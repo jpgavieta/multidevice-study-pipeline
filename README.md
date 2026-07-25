@@ -76,7 +76,9 @@ Logs a new row in `raw.pipeline` per device via `general/piepline_logger.py` so 
 │   ├── general/
 │   │   ├── __init__.py
 │   │   ├── study_registry.py        # loads/flattens by src/general/study_registry.py; writes to study.registry
-│   │   └── pipeline_logger.py       # logs one row per device per run; writes to raw.pipeline
+│   │   ├── pipeline_logger.py       # logs one row per device per run; writes to raw.pipeline
+│   │   └── db_connect.py            # shared db connection import for src/extract/extract.py + src/load/load.py 
+
 │   │                                
 │   │
 │   │   
