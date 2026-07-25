@@ -33,6 +33,7 @@ from psycopg2.extras import execute_values
 from dotenv import load_dotenv
 
 from general.run_logger import start_run, end_run
+from general.db_connect import connect_db
 
 # ============================================================================================================
 
@@ -65,17 +66,6 @@ WKT_COLUMNS = {
 
 # ============================================================================================================
 
-
-def _get_connection():
-    return psycopg2.connect(
-        host=os.environ["DB_HOST"],
-        port=os.environ.get("DB_PORT", 5432),
-        dbname=os.environ["DB_NAME"],
-        user=os.environ["DB_USER"],
-        password=os.environ["DB_PASSWORD"],
-    )
-
-
 def _build_location(latitude, longitude) -> str | None:
     """
     Builds an EWKT point string for atmotube.readings.location, e.g.
@@ -98,23 +88,23 @@ def load_raw_data(all_data: dict[str, dict[str, dict]]) -> tuple[dict[tuple[str,
 
     Returns { (device_type, device_id): ingest_id } so load_processed_data() can stamp every processed row with the raw.ingests row it came from.
     """
-    pulled_at = datetime.now(timezone.utc)
+    fetched_at = datetime.now(timezone.utc)
     keys, rows = [], []
     for device_type, devices in all_data.items():
         for device_id, entry in devices.items():
             keys.append((device_type, device_id))
-            rows.append((device_type, device_id, entry["ingest_method"], pulled_at, json.dumps(entry["payload"])))
+            rows.append((device_type, device_id, entry["ingest_method"], fetched_at, json.dumps(entry["payload"])))
 
     if not rows:
         print("⚠️ No raw data to load.")
-        return {}, pulled_at
+        return {}, fetched_at
 
-    conn = _get_connection()
+    conn = connect_db()
     try:
         with conn.cursor() as cur:
             returned = execute_values(
                 cur,
-                "INSERT INTO raw.ingests (device_type, device_id, ingest_method, pulled_at, payload) VALUES %s RETURNING id",
+                "INSERT INTO raw.ingests (device_type, device_id, ingest_method, fetched_at, payload) VALUES %s RETURNING id",
                 rows,
                 template="(%s, %s, %s, %s, %s::jsonb)",
                 fetch=True,
@@ -130,7 +120,7 @@ def load_raw_data(all_data: dict[str, dict[str, dict]]) -> tuple[dict[tuple[str,
 
     # Postgres processes/returns multi-row VALUES+RETURNING in input order, so this
     # zip is safe — each returned id lines up with the key at the same position.
-    return {key: returned_row[0] for key, returned_row in zip(keys, returned)}, pulled_at
+    return {key: returned_row[0] for key, returned_row in zip(keys, returned)}, fetched_at
 
 def _upsert_rows(cur, table: str, rows: list[dict], conflict_cols: tuple, returning: Optional[tuple] = None) -> list[dict]:   
     """
@@ -204,9 +194,15 @@ def _prepare_fitbit_readings_rows(rows: list[dict]) -> list[dict]:
         prepared.append(row)
     return prepared
 
-def _load_one_device(cur, device_type: str, device_id: str, data: dict, ingest_id: int, pulled_at: datetime) -> None:
+def _load_one_device(cur, device_type: str, device_id: str, data: dict, ingest_id: int, fetched_at: datetime) -> list[str]:
     """Loads every destination table for one device's parsed output. 
-    Raises on any failure — caller is responsible for commit/rollback, since that's where per-device isolation lives."""
+    Raises on any failure — caller is responsible for commit/rollback, since that's where per-device isolation lives.
+    Returns a list of skip-reason messages (empty if nothing was skipped)
+        Used by the caller to decide between status='success' and status='partial'
+        Also used to populate raw.pipeline.error_message with what was actually skipped.
+    """
+
+    skip_reasons: list[str] = []
 
     # sleep_sessions must land first — sleep_stages needs the generated
     # session_id, resolved below via each stage's session_started_at.
@@ -224,7 +220,7 @@ def _load_one_device(cur, device_type: str, device_id: str, data: dict, ingest_i
 
         if table_name == "profile":
             rows = dict(rows)  # don't mutate the parser's own output
-            rows["recorded_at"] = pulled_at
+            rows["recorded_at"] = fetched_at
             rows = [rows]  # single dict per device -> list of one to match _upsert_rows' expected shape
 
         if table_name == "sleep_stages":
@@ -235,8 +231,10 @@ def _load_one_device(cur, device_type: str, device_id: str, data: dict, ingest_i
                 row.pop("device_id", None)  # join key only — not a sleep_stages column
                 session_id = session_id_by_start.get(session_start)
                 if session_id is None:
-                    print(f"   ⚠️ No matching sleep_session for stage at "
-                        f"{row.get('started_at')} ({device_type}/{device_id}) — skipping.")
+                    msg = (f"No matching sleep_session for stage at "
+                        f"{row.get('started_at')} — skipped")
+                    print(f"   ⚠️ {msg} ({device_type}/{device_id})")
+                    skip_reasons.append(msg)
                     continue
                 row["session_id"] = session_id
                 resolved.append(row)
@@ -247,7 +245,9 @@ def _load_one_device(cur, device_type: str, device_id: str, data: dict, ingest_i
 
         key = (device_type, table_name)
         if key not in DESTINATION_TABLES:
-            print(f"   ⚠️ No destination table registered for {key} — skipping {len(rows)} row(s).")
+            msg = f"No destination table registered for {key} — {len(rows)} row(s) skipped"
+            print(f"   ⚠️ {msg}")
+            skip_reasons.append(msg)
             continue
 
         sql_table, conflict_cols = DESTINATION_TABLES[key]
@@ -265,10 +265,13 @@ def _load_one_device(cur, device_type: str, device_id: str, data: dict, ingest_i
         _upsert_rows(cur, sql_table, tagged_rows, conflict_cols)
         print(f"   ✅ Loaded {len(tagged_rows)} row(s) into {sql_table} for {device_type}/{device_id}")
 
+    return skip_reasons
+
+    return skipped
 def load_processed_data(
     transformed: dict[str, dict[str, dict]],
     ingest_ids: dict[tuple[str, str], int],
-    pulled_at: datetime,
+    fetched_at: datetime,
 ) -> None:
     """
     Inserts transform.py's output into the processed schema tables (fitbit.*, atmotube.*).
@@ -287,11 +290,11 @@ def load_processed_data(
         list[dict], ready for execute_values().
     ingest_ids : dict
         { (device_type, device_id): ingest_id } — output of load_raw_data().
-    pulled_at : datetime
+    fetched_at : datetime
         Shared timestamp from load_raw_data()'s pull batch — stamped onto
         fitbit.profile.recorded_at so each snapshot is anchored in time.
     """
-    conn = _get_connection()
+    conn = connect_db()
     try:
         for device_type, device_files in transformed.items():
             for device_id, entry in device_files.items():
@@ -302,19 +305,24 @@ def load_processed_data(
                     continue
 
                 data = entry.get("data", {})
-
                 run_id = start_run(conn, device_type, device_id)
                 try:
                     with conn.cursor() as cur:
-                        _load_one_device(cur, device_type, device_id, data, ingest_id, pulled_at)
+                        skip_reasons = _load_one_device(cur, device_type, device_id, data, ingest_id, fetched_at)
                     conn.commit()
-                    end_run(conn, run_id, status="success")
+                    if skip_reasons:
+                        summary = "; ".join(skip_reasons)
+                        end_run(conn, run_id, status="partial", error_message=summary)
+                        print(f"⚠️ Load partial for {device_type}/{device_id}: {len(skip_reasons)} issue(s) — {summary}")
+                    else:
+                        end_run(conn, run_id, status="success")
                 except Exception as e:
                     conn.rollback()
                     end_run(conn, run_id, status="failed", error_message=str(e))
                     print(f"❌ Load failed for {device_type}/{device_id}: {e}")
                     # Deliberately NOT re-raised — one device's failure shouldn't stop
                     # the rest of the batch from loading. See module docstring.
+                    # one device's failure shouldn't stop  the rest of the batch from loading
     finally:
         conn.close()
 
@@ -324,6 +332,6 @@ if __name__ == "__main__":
     from transform.transform import transform_device_data
 
     raw = extract_all_devices()
-    ingest_ids, pulled_at = load_raw_data(raw)
+    ingest_ids, fetched_at = load_raw_data(raw)
     transformed = transform_device_data(raw)
-    load_processed_data(transformed, ingest_ids, pulled_at)
+    load_processed_data(transformed, ingest_ids, fetched_at)

@@ -39,7 +39,7 @@ import json
 from datetime import date, timedelta
 from pathlib import Path
 
-from general.study_registry import load_devices
+from general.study_registry import load_registry
 
 # ============================================================================================================
 
@@ -152,10 +152,10 @@ def main():
     parser.add_argument("--samples", action="store_true", help="Fitbit only: print one sample record per non-empty data type")
     args = parser.parse_args()
 
-    devices = {d["id"]: d for d in load_devices()}
+    devices = {d["id"]: d for d in load_registry()["devices"]}
     device = devices.get(args.device_id)
     if device is None:
-        print(f"❌ '{args.device_id}' not found in config/devices.yml")
+        print(f"❌ '{args.device_id}' not found in config/study_registry.yml")
         return
 
     inspector = INSPECTORS.get(device["type"])

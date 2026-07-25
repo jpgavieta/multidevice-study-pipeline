@@ -9,11 +9,11 @@ initial wiring, and ongoing troubleshooting. Two subcommands:
 
     check   Confirms whether the API recognizes a given MAC as a real, known device at all — independent of date range. 
             Use this when a measurements pull returns 200 + empty items, to rule out "wrong MAC" vs "no data yet". 
-            --all lists every device the key can see, useful for reconciling against devices.yml.
+            --all lists every device the key can see, useful for reconciling against study_registry.yml.
 
 USAGE:
-python -m extract.scripts.verify_atmotube ping --device atmotube_kol_01
-python -m extract.scripts.verify_atmotube check --device atmotube_kol_01
+python -m extract.scripts.verify_atmotube ping --device atmotube_01
+python -m extract.scripts.verify_atmotube check --device atmotube_01
 python -m extract.scripts.verify_atmotube check --all
 
 For the full chunking/pagination code path and duplicate/dropped records across chunks, use inspect_data.py instead. 
@@ -27,7 +27,7 @@ from datetime import date, timedelta
 
 import requests
 
-from general.device_registry import load_devices  # adjust import if your loader lives elsewhere
+from general.study_registry import load_registry  # adjust import if your loader lives elsewhere
 from extract.config.tokens import get_atmotube_api_key
 from extract.clients.atmotube_client import DATA_BASE_URL, _normalize_mac
 
@@ -38,13 +38,10 @@ DEVICES_URL = "https://api2.atmotube.com/api/v1/devices"
 
 
 def _get_device(device_id: str) -> dict:
-    devices = load_devices()
-    if isinstance(devices, dict):
-        match = devices.get(device_id)
-    else:
-        match = next((d for d in devices if d.get("id") == device_id), None)
+    devices = load_registry()["devices"]
+    match = next((d for d in devices if d.get("id") == device_id), None)
     if not match:
-        raise KeyError(f"Device '{device_id}' not found in devices.yml")
+        raise KeyError(f"Device '{device_id}' not found in study_registry.yml")
     return match
 
 
@@ -55,7 +52,7 @@ def ping_test(device_id: str):
     print(f"--- ping TEST ({device_id}) ---")
 
     device = _get_device(device_id)
-    mac = _normalize_mac(device["mac"])
+    mac = _normalize_mac(device["access"])
     api_key = get_atmotube_api_key(device["site"])
     
     print(f"  MAC (normalized): {mac}")
@@ -64,7 +61,7 @@ def ping_test(device_id: str):
     yesterday = date.today() - timedelta(days=1)
     headers = {"X-Api-Key": api_key}
     params = {
-        "mac": mac,
+        "access": mac,
         "order": "DESC",
         "limit": 10,
         "start_date": yesterday.isoformat(),
@@ -112,8 +109,7 @@ def ping_test(device_id: str):
 # check: device/MAC registration status via /api/v1/devices
 
 def list_all_devices(site: str):
-    """Shows every device the given site's API key can see — cross-reference
-    against devices.yml's MACs to catch typos or mismatches at a glance."""
+    """Shows every device the given site's API key can see — cross-reference against study_registry.yml's MACs to catch typos or mismatches at a glance."""
     api_key = get_atmotube_api_key(site)
     headers = {"X-Api-Key": api_key}
     r = requests.get(DEVICES_URL, params={"return_config": False}, headers=headers, timeout=30)
@@ -130,7 +126,7 @@ def list_all_devices(site: str):
 
 def check_one(device_id: str):
     device = _get_device(device_id)
-    mac = _normalize_mac(device["mac"])
+    mac = _normalize_mac(device["access"])
     api_key = get_atmotube_api_key(device["site"])
     headers = {"X-Api-Key": api_key}
 
@@ -139,12 +135,11 @@ def check_one(device_id: str):
     r.raise_for_status()
     devices = r.json()
 
-    match = next((d for d in devices if d.get("mac", "").upper() == mac.upper()), None)
+    match = next((d for d in devices if d.get("access", "").upper() == mac.upper()), None)
 
     if not match:
         print(f"  ❌ MAC '{mac}' not found among the {len(devices)} device(s) this API key can see.")
-        print("     Either: the MAC in devices.yml/.env.access is wrong, OR this device")
-        print("     was never registered/paired to the account this API key belongs to.")
+        print("     Either: the MAC in study_registry.yml/.env.access is wrong, OR this device was never registered/paired to the account this API key belongs to.")
         print("\n  Devices the key CAN see:")
         for d in devices:
             print(f"    - {d.get('mac')} ({d.get('name')})")
@@ -157,8 +152,7 @@ def check_one(device_id: str):
 
     if not match.get("latest_data"):
         print("\n  ⚠️ Device is registered but has no latest_data — likely means the app-side")
-        print("     'upload historical data to cloud' setting was never enabled, or the")
-        print("     phone hasn't synced with the device since pairing.")
+        print("     'upload historical data to cloud' setting was never enabled, or the phone hasn't synced with the device since pairing.")
 
 
 if __name__ == "__main__":
@@ -166,10 +160,10 @@ if __name__ == "__main__":
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     ping_parser = subparsers.add_parser("ping", help="Live connectivity/shape check")
-    ping_parser.add_argument("--device", default="atmotube_kol_01", help="Device id from devices.yml")
+    ping_parser.add_argument("--device", default="atmotube_01", help="Device id from study_registry.yml")
 
     check_parser = subparsers.add_parser("check", help="Device/MAC registration check")
-    check_parser.add_argument("--device", help="Device id from devices.yml")
+    check_parser.add_argument("--device", help="Device id from study_registry.yml")
     check_parser.add_argument("--all", action="store_true", help="List every device visible to a site's API key")
     check_parser.add_argument("--site", default="kolkata", help="Required with --all, since keys are now per-site")
 

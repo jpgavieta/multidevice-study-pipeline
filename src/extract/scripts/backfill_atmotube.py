@@ -29,7 +29,7 @@ from datetime import timedelta
 
 import pandas as pd
 
-from general.device_registry import load_devices
+from general.study_registry import load_registry
 
 BACKFILL_DIR = Path(__file__).resolve().parents[1] / "config" / "secrets" / "atmotube" / "backfill"
 
@@ -216,12 +216,12 @@ def _group_files_by_mac() -> dict:
 
 
 def _mac_to_device_id_map() -> dict:
-    devices = load_devices()
+    devices = load_registry()["devices"]
     result = {}
     for d in devices:
         if d.get("type") != "atmotube":
             continue
-        mac = d["mac"].replace(":", "").replace("-", "").upper()
+        mac = d["access"].replace(":", "").replace("-", "").upper()
         result[mac] = d["id"]
     return result
 
@@ -275,7 +275,7 @@ def write_to_db(results: dict):
     for mac, result in results.items():
         device_id = result["device_id"]
         if device_id.startswith("UNKNOWN_DEVICE"):
-            print(f"  ⚠️ Skipping mac={mac} — not mapped in devices.yml, fix before loading")
+            print(f"  ⚠️ Skipping mac={mac} — not mapped in study_registry.yml, fix before loading")
             continue
 
         records = result["merged_data"]
@@ -300,7 +300,7 @@ def main():
     parser.add_argument("--device", default=None, help="Only process this device_id")
     parser.add_argument("--dry-run", action="store_true", help="Parse and report only, write nothing")
     parser.add_argument("--out", default=None, help="Output path for JSON (default: prints summary only)")
-    parser.add_argument("--write-db", action="store_true", help="Insert into raw.api_pulls")
+    parser.add_argument("--write-db", action="store_true", help="Insert into raw.ingests")
     args = parser.parse_args()
 
     mac_to_device = _mac_to_device_id_map()
@@ -314,7 +314,7 @@ def main():
     if args.device:
         target_mac = device_to_mac.get(args.device)
         if not target_mac:
-            print(f"❌ '{args.device}' not found in devices.yml as an atmotube device")
+            print(f"❌ '{args.device}' not found in study_registry.yml as an atmotube device")
             return
         groups = {target_mac: groups[target_mac]} if target_mac in groups else {}
         if not groups:
@@ -330,7 +330,7 @@ def main():
         return
 
     if args.write_db:
-        print("\nWriting to raw.api_pulls...")
+        print("\nWriting to raw.ingests...")
         write_to_db(results)
         return
 
@@ -341,7 +341,7 @@ def main():
     else:
         print(  "\nNo --out or --write-db given — results computed but not saved. "
                 "Pass --out <path.json> to inspect as a file, or --write-db to insert "
-                "into raw.api_pulls.")
+                "into raw.ingests.")
 
 
 if __name__ == "__main__":

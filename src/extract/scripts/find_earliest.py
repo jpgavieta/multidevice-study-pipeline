@@ -1,7 +1,6 @@
-# src/extract/scripts/find_earliest.py
 """
 One-time check for a newly onboarded device: pulls a wide date range and reports the earliest date with real (non-empty) data. 
-This is so it can set an accurate `start_date` in config/devices.yaml instead of guessing.
+This is so it can set an accurate `start_date` in config/study_registry.yml instead of guessing.
 
 Dispatches per device_type — each client module needs its own find_earliest_data(device_id, start, end) function, since response shapes differ per API and can't be parsed generically.
 
@@ -11,7 +10,7 @@ USAGE for each device type:
 python -m extract.scripts.verify_fitbit fitbit_kol_01
 python -m extract.scripts.find_earliest fitbit_kol_01
 
-And then update devices.yml with the real start_date it reports.
+And then update study_registry.yml with the real start_date it reports.
 
     b. ATMOTUBE (one at a time)
 python -m extract.scripts.find_earliest atmotube_kol_01
@@ -21,7 +20,7 @@ python -m extract.scripts.find_earliest atmotube_kol_01
 import sys
 from datetime import date, timedelta
 
-from general.device_registry import load_devices
+from general.study_registry import load_registry
 from extract.clients import fitbit_client
 from extract.clients import atmotube_client  
 
@@ -44,10 +43,10 @@ def main():
         sys.exit(1)
 
     device_id = sys.argv[1]
-    devices = {d["id"]: d for d in load_devices()}
+    devices = {d["id"]: d for d in load_registry()["devices"]}
     device = devices.get(device_id)
     if device is None:
-        print(f"❌ '{device_id}' not found in config/devices.yaml")
+        print(f"❌ '{device_id}' not found in config/study_registry.yml")
         sys.exit(1)
 
     finder_fn = FINDER_REGISTRY.get(device["type"])
@@ -65,7 +64,7 @@ def main():
     for data_type, earliest in earliest_by_type.items():
         print(f"  {data_type}: {earliest or 'no data in range'}")
 
-    print(f"\nUpdate config/devices.yaml: set start_date for '{device_id}' based on the above.")
+    print(f"\nUpdate config/study_registry.yml: set start_date for '{device_id}' based on the above.")
 
 
 if __name__ == "__main__":

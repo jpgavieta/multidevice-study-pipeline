@@ -11,11 +11,11 @@ Same underlying call handles both:
 Prerequisites for onboarding a NEW device:
     1.  The device's Google account must first be added as a Test User in the
         Google Cloud Console (OAuth consent screen > Audience).
-    2.  MUST know the device_id you're about to assign it (check devices.yml; e.g. fitbit_kol_08).
+    2.  MUST know the device_id you're about to assign it (check study_registry.yml; e.g. fitbit_08).
 
 USAGE:
-python -m extract.scripts.verify_fitbit fitbit_kol_07   # one device — onboards if new, verifies if not
-python -m extract.scripts.verify_fitbit --all           # every fitbit device in devices.yml
+python -m extract.scripts.verify_fitbit fitbit_06   # one device — onboards if new, verifies if not
+python -m extract.scripts.verify_fitbit --all           # every fitbit device in study_registry.yml
 
 If a browser window opens, sign in to THIS DEVICE'S Google account (NOT a personal account), and approve the requested permissions.
 
@@ -27,7 +27,7 @@ only devices needing a real consent flow will prompt before each one, so always 
 import sys
 import argparse
 
-from general.study_registry import load_devices
+from general.study_registry import load_registry
 from extract.config.tokens import get_fitbit_token
 from extract.clients.fitbit_client import get_profile
 
@@ -72,9 +72,9 @@ def verify_one(device_id: str) -> bool:
 
 
 def verify_all():
-    devices = [d for d in load_devices() if d.get("type") == "fitbit"]
+    devices = [d for d in load_registry()["devices"] if d.get("type") == "fitbit"]
     if not devices:
-        print("❌ No fitbit devices found in devices.yml")
+        print("❌ No fitbit devices found in study_registry.yml")
         sys.exit(1)
 
     already_valid, needs_onboarding = [], []
@@ -125,7 +125,7 @@ def main():
         verify_all()
     elif args.device_id:
         verify_one(args.device_id)
-        print(f"\nIf new: add '{args.device_id}' to config/devices.yml if not already present.")
+        print(f"\nIf new: add '{args.device_id}' to config/study_registry.yml if not already present.")
     else:
         parser.error("Provide a device_id or use --all")
 
