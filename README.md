@@ -25,7 +25,11 @@ Built specifically for a small-scale research (sole maintainer, some dozen devic
 
 ## Data Flow from Multiple Devices
 
-The data pipeline starts from wherever the data is kept. `load.py`'s `__main__` block orchestrates the full run: it calls `extract.extract_all_devices()` to pull raw payloads per device, `load_raw_data()` to persist those into `raw.ingests` (returning an `ingest_id` per device), `transform.transform_device_data()` to run each device's payload through its registered parser (`transform/parse/`, driven by `transform/register/`), and finally `load_processed_data()` to upsert the resulting row-dicts into the destination tables (`fitbit.*` / `atmotube.*`) — resolving cross-table foreign keys (e.g. `sleep_stages` → `sleep_sessions`) along the way, and logging one `study.pipeline_runs` row per device via `general/run_logger.py` so failures are visible without reading stdout.
+***Extract → Load:***  `load.py`'s `__main__` orchestrates the full run: it calls `extract.extract_all_devices()` to pull raw payloads per device, and `load_raw_data()` populates into `raw.ingests` — returns an `ingest_id` per physical device.
+
+***Extract → Transform → Load:*** `transform.transform_device_data()` runs each device's payload through its device type's registered parser (`transform/parse/`, driven by `transform/register/`).`load_processed_data()` to upsert the resulting row-dicts into the destination tables (`fitbit.*` / `atmotube.*`). 
+
+Logs a new row in `raw.pipeline` per device via `general/piepline_logger.py` so failures are visible without reading stdout.
 
 [![Flow of Data from Multiple Devices](dataflow_diagram.svg)](dataflow_diagram.svg)
 
@@ -35,97 +39,107 @@ The data pipeline starts from wherever the data is kept. `load.py`'s `__main__` 
 ./
 ├── README.md
 ├── multidevice_dataflow.png
-├── _quarto.yml                    # for public-facing data reports
 │
 │                              ## DEV SETTINGS
 ├── .gitignore
 ├── pyproject.toml                 # python packaged data building tools
 ├── environment.yml                # conda environment for python+system-level libraries (not pip installable)
-├── .env                           # gitignored — DB connection vars, Grafana admin creds
-├── .vscode/
-│   ├── settings.json
-│   └── tasks.json
 │
 ├── config/
-│   ├── devices.yml                # device registry (fitbit_devices / atmotube_devices, keyed by "*_devices") + site→credential mapping; loaded/flattened by general/device_registry.py
-│   ├── participants.yml           # participant registry + device_assignments (assigned_from / assigned_until — still TODO, all null)
-│   └── schedule.yml               # APScheduler job definitions (currently one test job; src/scheduler/ itself not yet built)
+│   ├── study_registry.yml         # rotating participant-to-device study design 
+│   └── pipeline_schedule.yml      # APScheduler job definitions (NOTE: pipeline_schedule.py itself not yet built)
 │~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 │
 ├── deploy/                    ## DB+VIZ DEPLOYMENT
-│   ├── docker-compose.yml         # Postgres+PostGIS + Grafana, defined as services
-│   └── postgres/
-│       └── init/
-│           ├── 01_enable_postgis.sql
-│           └── 02_create_app_schema.sql
-│   # NOTE: docker-compose.yml also mounts ./grafana/{grafana-data,provisioning,dashboard-json} —
-│   #       none of those exist on disk yet, so Grafana comes up unprovisioned until that's added.
+│   ├── docker-compose.yml          # Postgres+PostGIS + Grafana as services
+│   ├── postgres/
+│   │   ├── test_db.sh              # throwaway container DB for pipeline test-runs
+│   │   └── init/
+│   │       ├── 00_extensions.sql   # enables postGIS + btree_gist
+│   │       ├── 01_schemas.sql
+│   │       ├── 03_study.sql        # study.registry — append/upsert log of participants-to-device (users) assignments
+│   │       ├── 02_raw.sql          # raw.ingests / pipeline  — append-only log of raw api payoads (JSONB) and pipeline runs
+│   │       ├── 04_atmotube.sql     # atmotube.readings — adds GEOMETRY location col
+│   │       ├── 05_fitbit.sql       # fitbit.readings / sleep_sessions  / exercise_sessions / profile
+│   │       └── ...                 # coming soon: whatsapp + google maps
+│   │
+│   │
+│   └── grafana/
+│       ├── boot.yml    # point Grafana at snapshop/ to load dashboard on boot (allowUIUpdates: true -> drag-n-drop GUI edits)  
+│       └── snapshots/  # after GUI dashboard designing, json export + git commit here to save (allows for dashboard configs to survive redeployment)
 │
 │~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 │                              ## ETL PIPELINE
 ├── src/
-│   ├── main.py                    # currently just env-var validation (REQUIRED_ENV_VARS check) — "start the scheduler, stay live" entrypoint isn't wired up yet
+│   ├── main.py                      # "start the scheduler, stay live" entrypoint isn't wired up yet
 │   │                              
 │   ├── general/
 │   │   ├── __init__.py
-│   │   ├── device_registry.py     # load_devices(): flattens config/devices.yml's *_devices lists, resolves !ENV tags
-│   │   └── run_logger.py          # start_run()/end_run() write to study.pipeline_runs, one row per device per run;
-│   │                              # last_successful_pull() exists but isn't wired into extract.py yet — see TODO below
+│   │   ├── study_registry.py        # loads/flattens by src/general/study_registry.py; writes to study.registry
+│   │   └── pipeline_logger.py       # logs one row per device per run; writes to raw.pipeline
+│   │                                
 │   │
+│   │   
 │   ├── extract/
 │   │   ├── __init__.py
-│   │   ├── extract.py             # extract_all_devices(): threaded per-device pulls, rate-limit aware;
-│   │   │                          # embeds {"payload", "ingest_method", "timezone"} per device_id
-│   │   ├── clients/
+│   │   ├── extract.py               # extract_all_devices(): threaded per-device pulls
+│   │   │                            ##   embeds {"payload", "ingest_method", "timezone"} per device_id
+│   │   │
+│   │   ├── clients/                 # API creds per device/source type
 │   │   │   ├── __init__.py
 │   │   │   ├── atmotube_client.py
 │   │   │   └── fitbit_client.py
-│   │   ├── scripts/               # one-off debugging / device-onboarding scripts — not part of the scheduled pipeline
-│   │   │   ├── backfill_atmotube.py   # converts exported Atmotube CSVs into extract_raw_data()'s exact output shape
-│   │   │   ├── find_earliest.py
-│   │   │   ├── inspect_data.py        # dumps a device's full raw API pull, for exploring field names before registry work
-│   │   │   ├── verify_atmotube.py
-│   │   │   └── verify_fitbit.py
-│   │   └── config/
-│   │       ├── __init__.py
-│   │       ├── tokens.py          # resolves site → env var name → secret
-│   │       ├── fitbit_tokens.py
-│   │       ├── atmotube_tokens.py
-│   │       └── secrets/           # gitignored — everything under here, no exceptions
+│   │   │
+│   │   ├── config/
+│   │   │   ├── __init__.py
+│   │   │   ├── tokens.py            # resolves site -> env var name -> secret
+│   │   │   ├── fitbit_tokens.py
+│   │   │   ├── atmotube_tokens.py
+│   │   │   └── secrets/             # ALWAYS gitignored
+│   │   │
+│   │   └── scripts/                 
+│   │       ├── __init__.py          # NOT part of ETL pipeline
+│   │       ├── backfill_atmotube.py ##  converts historic CSVs -> extract_raw_data()'s output shape
+│   │       ├── find_earliest.py     ##  finds one device's earliest date column/s
+│   │       ├── inspect_data.py      ##  dumps one device's full raw API pull
+│   │       ├── verify_atmotube.py   ##  onboards devices on Atmo Cloud 
+│   │       └── verify_fitbit.py     ##  onboards devices on Google account
+│   │
+│   │
 │   │
 │   ├── transform/
 │   │   ├── __init__.py
-│   │   ├── transform.py           # transform_device_data(): device_type → parser via DEVICE_REGISTRY;
-│   │   │                          # calls parser.parse(payload, device_id, timezone) uniformly; output is
-│   │   │                          # { device_type: { device_id: { "data": { table_name: [ {row}, ... ] } } } }
+│   │   ├── transform.py            # transform_device_data(): device_type → parser via study_registry;
+│   │   │                           ##   calls parser.parse(payload, device_id, timezone) uniformly
+│   │   │                           ##   embeds { device_type: { device_id: { "data": { table_name: [ {row}, ... ] } } } }
 │   │   ├── parse/
 │   │   │   ├── __init__.py
 │   │   │   ├── atmotube_parser.py
-│   │   │   ├── fitbit_parser.py
-│   │   │   └── DEPRECIATEDponyopi_parser.py   # disabled; not imported by transform.py
-│   │   └── register/
+│   │   │   └── fitbit_parser.py
+│   │   │
+│   │   ├── register/
+│   │   │   ├── __init__.py
+│   │   │   ├── atmotube_registry.py##  decalres the standard name, measurement unit, dtype, data category per column
+│   │   │   └── fitbit_registry.py  ##  declares the ~15 Fitbit data types into a normalized lookup shape
+│   │   │
+│   │   └── scripts/                
 │   │       ├── __init__.py
-│   │       ├── atmotube_registry.py   # raw_key -> (standard_name, unit, dtype, category) per field
-│   │       └── fitbit_registry.py     # declarative rules for the ~15 Fitbit data types that reduce to a lookup shape
+│   │       └── test_parser.py      # NOT part of ETL pipeline (test + add new device types with parser specifics)
+│   │
+│   │
 │   │
 │   └── load/
 │       ├── __init__.py
 │       ├── load.py                # load_raw_data() -> raw.ingests (append-only, returns ingest_ids);
 │       │                          # load_processed_data() -> fitbit.*/atmotube.*, upserts on each table's UNIQUE key,
-│       │                          # commits per device_id (one bad device doesn't roll back the rest of the batch)
-│       ├── schemas.sql             # \i's schema/00_schemas.sql through 04_fitbit.sql, in order — confirmed correct
-│       └── schema/
-│           ├── 00_schemas.sql
-│           ├── 01_raw.sql         # raw.ingests — append-only log of every pipeline pull, JSONB payload
-│           ├── 02_study.sql       # study.devices, study.pipeline_runs, etc.
-│           ├── 03_atmotube.sql    # atmotube.readings — one table (+ adds PostGIS location column)
-│           └── 04_fitbit.sql      # fitbit.readings / sleep_sessions / sleep_stages / exercise_sessions / profile
-│
+│       │                          ##   commits per device_id (one bad device doesn't roll back the rest of the batch)
+│       └── scripts/
+│           ├── __init__.py         
+│           ├── seed_study.py      ##   initalizes the study_registry.yml as referential data table
+│           └──test_pipeline.py    ##   NOT part of ETL pipeline (tests full wiring; read deloy/postgres/test_db.sh container for step-by-step guide)
 │~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-├── tests/
-│   └── test_pipeline_wiring.py    # mocked extract -> transform -> load wiring test; no real DB/API needed
 │
-└── docs/                          # GitHub Pages — manual notebooks + rendering helpers
+└── docs/                          # GitHub Pages — datasheets and nb reports (+ html render helpers)
     ├── __init__.py
     ├── manual.ipynb
     ├── stats.py
@@ -138,9 +152,6 @@ The data pipeline starts from wherever the data is kept. `load.py`'s `__main__` 
 **Planned, described above but not yet in the repo:**
 - `src/scheduler/` (`scheduler.py`, `jobs.py`) — APScheduler wiring that reads `config/schedule.yml` and calls the E→T→L pipeline on a cadence; `apscheduler` is already a `pyproject.toml` dependency
 - `notifications/notify.py` — email/Slack alerting on a failed `study.pipeline_runs` row
-- `deploy/grafana/provisioning/` + `dashboard-json/` — referenced by `docker-compose.yml`'s volume mounts, not yet created
-- `src/load/migrations/` — schema change history, once the schema stabilizes past active iteration
-- Incremental extraction: `run_logger.last_successful_pull()` already exists to look up a device's last successful run, but `extract.py`'s `get_date_range()` still always starts from `devices.yml`'s static `start_date` rather than resuming from there — re-pulls are safe (everything upserts) but currently wasteful past the first backfill
 
 # How to setup dev environment (fresh machine / new teammate)
 
@@ -169,13 +180,7 @@ cp .env.example .env
 
 ```
 cd deploy
-docker compose up -d
-```
-
-Then apply the schema:
-
-```
-psql "$DATABASE_URL" -f src/load/schemas.sql
+docker compose up
 ```
 
 ## 5. Sanity check the package installed correctly
