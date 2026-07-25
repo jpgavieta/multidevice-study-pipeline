@@ -1,7 +1,7 @@
 from functools import reduce
 import pandas as pd
 
-from ..utils import (
+from ..DEPRECATEDutils import (
     build_gis_df,
     add_timezone_col,
     get_cols,

@@ -11,7 +11,7 @@ services:
       - "${DB_PORT}:5432" # Host:Container
     volumes:
       - pg_data:/var/lib/postgresql/data
-      - ./postgres/init:/docker-entrypoint-initdb.d
+      - ./postgres/init:/docker-entrypoint-initdb.d # Where all the preset schemas + tables are!
     networks:
       - app_net
 
@@ -21,7 +21,7 @@ services:
     restart: unless-stopped
     user: "0:0"
     ports:
-      - "3000:3000"
+      - "300:3000"
     environment:
       GF_SECURITY_ADMIN_USER: ${GF_ADMIN_USER}
       GF_SECURITY_ADMIN_PASSWORD: ${GF_ADMIN_PASSWORD}

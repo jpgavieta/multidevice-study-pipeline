@@ -11,7 +11,7 @@ CREATE TABLE IF NOT EXISTS raw.ingests (
 );
 
 CREATE INDEX IF NOT EXISTS idx_raw_ingests_device
-    ON raw.ingests (device_type, device_id, pulled_at DESC);
+    ON raw.ingests (device_type, device_id, fetched_at DESC);
 
 CREATE INDEX IF NOT EXISTS idx_raw_ingests_payload_gin
     ON raw.ingests USING GIN (payload);

@@ -1,13 +1,13 @@
 -- deploy/postgres/init/02_study.sql
 -- No data FROM a device — only data ABOUT participants and devices from config/study_registry.yml
 
--- Device-only registry: one row per physical device, independent of its user history.
+-- Device-only dimension: one row per physical device, independent of its user history.
 CREATE TABLE IF NOT EXISTS study.devices (
     id          TEXT PRIMARY KEY,
     device_type TEXT NOT NULL
 );
 
--- Participant-only registry: one row per participant, independent of any single user period (used for Grafana dashboard filtering)
+-- Participant-only dimension: one row per participant, independent of any single user period (used for Grafana dashboard filtering)
 CREATE TABLE IF NOT EXISTS study.participants (
     id   TEXT PRIMARY KEY,
     site TEXT
@@ -34,17 +34,28 @@ CREATE TABLE IF NOT EXISTS study.registry (
     CONSTRAINT uq_device_period UNIQUE (device_id, user_start)
 );
 
-CREATE INDEX IF NOT EXISTS idx_users_site_mismatch ON study.registry (site_mismatch) WHERE site_mismatch;
+-- CREATE INDEX IF NOT EXISTS idx_mismatch_users -- see any site mismatches
+--     ON study.registry (site_mismatch) 
+--     WHERE site_mismatch;
 
+-- CREATE INDEX IF NOT EXISTS idx_active_users -- see all active users
+--     ON study.registry (device_id, user_start DESC)
+--     WHERE user_end IS NULL;
 
--- Set views Grafana can query to: study.site_mismatches (for manual debugging), study.registry_with_device_type (just incase)
+-- Query-able (for Grafana): 
 
-CREATE OR REPLACE VIEW study.site_mismatches AS
+CREATE OR REPLACE VIEW study.site_mismatches AS -- for manual debugging in the future?
     SELECT participant_id, device_id, participant_site, device_site
     FROM study.registry
     WHERE site_mismatch;
 
-CREATE OR REPLACE VIEW study.registry_with_device_type AS
+CREATE OR REPLACE VIEW study.registry_w_device_type AS -- for ANY device status (device type queriable)
     SELECT r.*, d.device_type
     FROM study.registry r
     JOIN study.devices d ON d.id = r.device_id;
+
+CREATE OR REPLACE VIEW study.active_users AS -- for ALL active users (device type queriable)
+    SELECT DISTINCT ON (device_id) *
+    FROM study.registry_w_device_type
+    WHERE user_end IS NULL
+    ORDER BY device_id, user_start DESC;
