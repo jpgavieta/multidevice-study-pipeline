@@ -1,6 +1,4 @@
 #!/usr/bin/env bash
-# make it executable first: chmod +x ./deploy/postgres/test_db.sh
-# to end it (also removes): docker stop multidevice_test_db
 
 set -euo pipefail
 
@@ -40,3 +38,23 @@ echo "Running: $@"
 
 echo "Tearing down..."
 docker stop "$CONTAINER_NAME"
+
+## ====================================================================
+# Test-run Entire Pipeline: Step-by-step Guide (^_^ ) !
+
+# 1. Make test_db.sh executab;e
+# chmod +x ./deploy/postgres/test_db.sh
+
+# 2. Quick sanity check without burning a full container cycle (catch import errors, types, etc)
+# PYTHONPATH=src python -m py_compile src/general/study_registry.py src/general/db_connect.py src/load/load.py src/load/scripts/seed_study.py src/load/scripts/test_pipeline.py src/transform/scripts/test_parser.py
+
+# 3. Run parser-only test (no DB invovled, confirm transform is healthy independdnet of Docker shi)
+# PYTHONPATH=src python -m transform.scripts.test_parser fitbit_01
+# PYTHONPATH=src python -m transform.scripts.test_parser atmotube_01
+
+# 4. Run full pipeline test (fitbit data against disposable db container)
+# PYTHONPATH=src ./deploy/postgres/test_db.sh python -m load.scripts.test_pipeline fitbit_01
+# PYTHONPATH=src ./deploy/postgres/test_db.sh python -m load.scripts.test_pipeline atmotube_01
+
+# 5. If the db container doesn't automatically remove itself
+# docker kill multidevice_test_db
