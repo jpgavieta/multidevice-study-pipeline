@@ -155,7 +155,7 @@ Logs a new row in `raw.pipeline` per device via `general/piepline_logger.py` so 
 - `src/scheduler/` (`scheduler.py`, `jobs.py`) — APScheduler wiring that reads `config/schedule.yml` and calls the E→T→L pipeline on a cadence; `apscheduler` is already a `pyproject.toml` dependency
 - `notifications/notify.py` — email/Slack alerting on a failed `study.pipeline_runs` row
 
-# How to setup dev environment (fresh machine / new teammate)
+# How to dev setup (fresh machine / new teammate):
 
 ## 1. Clone the repo
 
