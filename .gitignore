@@ -36,13 +36,14 @@ docker-compose.override.yml
 grafana/grafana-data/
 deploy/grafana/grafana-data/
 
-# BUT ensure dashboard JSON configs are tracked
-# but explicit inclusion if needs narrowing later: 
+# BUT ensure dashboard JSON configs are tracked but explicit inclusion if needs narrowing later: 
 #!grafana/dashboard-json/*.json
 #!deploy/grafana/dashboard-json/*.json
 .json
 
-*.egg-info
+__pycache__/
+*.py[cod]
+*.egg-info/
 
 .gitattributes 
 
