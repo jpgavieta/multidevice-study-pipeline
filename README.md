@@ -14,7 +14,7 @@ Built for a multi-site study tracking environmental exposure (Atmotube air quali
 - *Ingests*: Pulls each device's cloud API (Atmotube, Google Health/Fitbit) via threaded per-device requests, rate-limit aware. Scheduling runs inside `src/main.py` -- a single daily job (APScheduler `BlockingScheduler` + `CronTrigger`, UTC) wrapping the full extract → load_raw → transform → load_processed sequence, with tenacity retry on run-level failures and Slack alerting via `notify_failure()`. Schedule time is config-driven via `PIPELINE_RUN_HOUR`/`PIPELINE_RUN_MINUTE` in `deploy/.env`.
 - *Processes*: Standardizes and validates per device type -- parsing raw API responses into row-dicts matching each destination table's columns exactly, ready for insert.
 - *Stores*: Maintains a PostgreSQL + PostGIS database (via Docker) for raw + processed data, with upserts (`ON CONFLICT ... DO UPDATE`) so re-pulling overlapping date ranges is safe, and device/participant assignment tracking (`config/study_registry.yml`) to reconcile data across a rotating-device study design.
-- [TODO]: *Visualizes*: Provides non-technical abilities to visualize the data -- internal-facing DB dashboard via Grafana (service is defined in `docker-compose.yml` but not yet implemented)
+- (**TODO**: *Visualizes*: Provides non-technical abilities to visualize the data -- internal-facing DB dashboard via Grafana; service already defined in `docker-compose.yml`)
 
 2. **Why does this exists?**
 
@@ -113,7 +113,7 @@ Logs a new row in `raw.pipeline` per device via `general/piepline_logger.py` so 
 │   │       ├── inspect_data.py      ##  dumps one device's full raw API pull
 │   │       ├── verify_atmotube.py   ##  onboards devices on Atmo Cloud 
 │   │       └── verify_fitbit.py     ##  onboards devices on Google account 
-│   │                                 #    NOTE: must rerun per device to reissue tokens after refresh tokens expire every 7 days; when OAuth app is in Testing mode (TODO: move app to Production mode) 
+│   │                                 #    NOTE: must rerun per device to reissue tokens after refresh tokens expire every 7 days; when OAuth app is in Testing mode (**TODO**: move app to Production mode) 
 │   │
 │   │
 │   │
@@ -162,9 +162,9 @@ Logs a new row in `raw.pipeline` per device via `general/piepline_logger.py` so 
         └── report.ipynb
 ```
 
-**Still planned, not yet in the repo:**
-- Persisting `pipeline_run` history/alerting beyond Slack (e.g. a dashboard panel surfacing recent `raw.pipeline` failures directly, rather than only journal/Slack)
-- Deciding whether a high per-device skip-rate (not just a run-level exception) should also trigger `notify_failure()` -- currently only a full run-level failure (after tenacity retries are exhausted) triggers a Slack alert; per-device skips/failures are logged to `raw.pipeline` and stdout only
+**(TODO:**
+- Should visualize `pipeline_run` history/alerting beyond Slack (e.g. a Grafana dashboard panel showing recent `raw.pipeline` failures directly, rather than only journal/Slack)?
+- Should high per-device skip-rate (not just a run-level exception) also trigger `notify_failure()?` Currently only a full run-level failure (after tenacity retries are exhausted) triggers a Slack alert; per-device skips/failures are logged to `raw.pipeline` and stdout only)
 
 # How to dev setup (fresh machine / new teammate):
 
