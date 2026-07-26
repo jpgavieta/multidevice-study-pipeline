@@ -74,10 +74,10 @@ Logs a new row in `raw.pipeline` per device via `general/piepline_logger.py` so 
 │                              ## ETL PIPELINE
 ├── src/
 │   ├── main.py                     # scheduler entrypoint -- ONE daily job (run_daily_pipeline) wrapping
-│   │                               #   extract → load_raw → transform → load_processed. APScheduler
-│   │                               #   BlockingScheduler + CronTrigger (explicit UTC on both), tenacity
-│   │                               #   retry around run-level (not per-device) failures, notify_failure()
-│   │                               #   posts to Slack (chat.postMessage) on a failure that survives retries.
+│   │                               #   extract → load_raw → transform → load_processed. 
+│   │                               #   APScheduler's BlockingScheduler + CronTrigger (explicit UTC on both), 
+│   │                               #   tenacity retry around run-level (not per-device) failures, 
+│   │                               #   notify_failure() posts to Slack (chat.postMessage) on a failure that survives retries.
 │   │                               #   Started/kept alive by systemd (deploy/systemd/) in production.
 │   │                              
 │   ├── general/
