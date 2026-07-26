@@ -1,8 +1,0 @@
-jobs:
-  - name: fitbit_pull
-    trigger: interval
-    minutes: 30
-
-  - name: atmotube_pull
-    trigger: interval
-    minutes: 30

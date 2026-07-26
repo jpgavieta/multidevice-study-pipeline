@@ -56,7 +56,7 @@ def get_date_range(device_start_date: str | None = None, end_date: date | None =
 
 
 def _pull_one_device(device_type: str, device: dict, start_date: str, end_date: str):
-    """Returns (device_id, raw_payload, error). raw_payload is untouched — no parsing here."""
+    """Returns (device_id, raw_payload, error). raw_payload is untouched -- no parsing here."""
     client_fn = CLIENT_REGISTRY.get(device_type)
     if client_fn is None:
         return device["id"], None, NotImplementedError(f"No client registered for device_type={device_type}")
@@ -76,11 +76,11 @@ def extract_all_devices(
     Pulls raw API data for every device in the registry: device_type -> device_id -> {"payload": ..., "ingest_method": ...}.
 
     Each device's date range is computed individually via get_date_range(). 
-    The start date prefers that device's last successful raw.pipeline run (incremental pull, checked via pipeline_logger.last_successful_fetch) over study_registry.yml's static start_date — so a
+    The start date prefers that device's last successful raw.pipeline run (incremental pull, checked via pipeline_logger.last_successful_fetch) over study_registry.yml's static start_date -- so a
     device that's already been running just re-pulls from its last success forward, and only a brand-new device (no successful run yet) falls back to the yml's start_date for a full
     backfill.
 
-    ingest_method is uniform for the whole run (not per-device) — pass "api_auto" for scheduler-triggered runs (the default) or "api_manual" for an ad-hoc/manual run.
+    ingest_method is uniform for the whole run (not per-device) -- pass "api_auto" for scheduler-triggered runs (the default) or "api_manual" for an ad-hoc/manual run.
     It's written straight through to raw.ingests.ingest_method by load.py, so it must be one of VALID_INGEST_METHODS.
     """
     if ingest_method not in VALID_INGEST_METHODS:
@@ -96,7 +96,7 @@ def extract_all_devices(
 
     # Resolve effective start date per device: prefer last successful run's
     # start over the yml's static start_date. One connection, sequential
-    # lookups, closed before the thread pool opens — daily-cadence pulls
+    # lookups, closed before the thread pool opens -- daily-cadence pulls
     # don't need real-time precision here.
     conn = connect_db()
     try:

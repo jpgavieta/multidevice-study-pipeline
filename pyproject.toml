@@ -1,5 +1,5 @@
 [project]
-name = "multidevice-datakit"
+name = "multidevice-study-pipeline"
 version = "0.1.0"
 description = "ETL pipeline for multi-device environmental and biometric data"
 requires-python = ">=3.10"

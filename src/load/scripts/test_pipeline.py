@@ -78,7 +78,7 @@ def _confirm_safe_db():
 def _parse_fitbit(device_id: str, timezone: str | None, raw_data: dict) -> tuple[dict, dict]:
     from transform.parse import fitbit_parser
     if not timezone:
-        sys.exit(f"❌ '{device_id}' has no 'timezone' set — required for daily-grain fields.")
+        sys.exit(f"❌ '{device_id}' has no 'timezone' set -- required for daily-grain fields.")
     parsed = fitbit_parser.parse(raw_data, device_id, timezone)
     expected_counts = {
         table: (1 if table == "profile" else len(rows))
@@ -95,7 +95,7 @@ def _verify_fitbit(cur, device_id: str, expected_counts: dict) -> None:
         else:
             key = ("fitbit", table_name)
             if key not in DESTINATION_TABLES:
-                print(f"   ⚠️ No destination table registered for {key} — load.py silently skips these rows.")
+                print(f"   ⚠️ No destination table registered for {key} -- load.py silently skips these rows.")
                 continue
             sql_table, _ = DESTINATION_TABLES[key]
             where_clause = "device_id = %s"
@@ -107,10 +107,10 @@ def _verify_fitbit(cur, device_id: str, expected_counts: dict) -> None:
         if actual_count == expected_count:
             print(f"   ✅ {sql_table}: {actual_count} row(s) (matches parser output)")
         elif actual_count < expected_count:
-            print(f"   ⚠️ {sql_table}: expected {expected_count}, found {actual_count} — check for "
+            print(f"   ⚠️ {sql_table}: expected {expected_count}, found {actual_count} -- check for "
                 f"skipped rows (e.g. unresolved sleep_stage session_id, duplicate UNIQUE-key collisions).")
         else:
-            print(f"   ⚠️ {sql_table}: found MORE rows ({actual_count}) than parsed ({expected_count}) — "
+            print(f"   ⚠️ {sql_table}: found MORE rows ({actual_count}) than parsed ({expected_count}) -- "
                 f"likely pre-existing data from a prior run against this DB.")
 
     # activity-level (categorical) rows: confirm where the state value actually landed.
@@ -123,7 +123,7 @@ def _verify_fitbit(cur, device_id: str, expected_counts: dict) -> None:
     if sample:
         tag_val, value_text_val = sample
         print(f"   ℹ️ activity-level sample: tag={tag_val!r}, value_text={value_text_val!r} "
-            f"(module docstring says state should be in value_text — confirm this is intended)")
+            f"(module docstring says state should be in value_text -- confirm this is intended)")
 
 
 # ============================================================================================================
@@ -132,7 +132,7 @@ def _verify_fitbit(cur, device_id: str, expected_counts: dict) -> None:
 def _parse_atmotube(device_id: str, timezone: str | None, raw_data: dict) -> tuple[dict, dict]:
     from transform.parse import atmotube_parser
     if not timezone:
-        print(f"  ⚠️ '{device_id}' has no 'timezone' — fine as long as every 'date' "
+        print(f"  ⚠️ '{device_id}' has no 'timezone' -- fine as long as every 'date' "
             f"value in the capture already carries a UTC offset.")
     parsed = atmotube_parser.parse(raw_data, device_id, timezone)
     expected_counts = {"readings": len(parsed.get("readings", []))}
@@ -150,7 +150,7 @@ def _verify_atmotube(cur, device_id: str, expected_counts: dict) -> None:
     if actual_count == expected_count:
         print(f"   ✅ {sql_table}: {actual_count} row(s) (matches parser output)")
     else:
-        print(f"   ⚠️ {sql_table}: expected {expected_count}, found {actual_count} — check for "
+        print(f"   ⚠️ {sql_table}: expected {expected_count}, found {actual_count} -- check for "
             f"duplicate recorded_at values colliding on upsert, or pre-existing data in this DB.")
 
     cur.execute(
@@ -193,13 +193,13 @@ def main():
 
     print(f"\n[2/4] Loading raw payload into raw.ingests...")
     all_data = {device_type: {args.device_id: {"payload": raw_data, "ingest_method": "test_script"}}}
-    ingest_ids, fetched_at, skipped = load_raw_data(raw)    
+    ingest_ids, fetched_at, _ = load_raw_data(all_data)
     assert (device_type, args.device_id) in ingest_ids, "load_raw_data() did not return an ingest_id for this device"
     print(f"   ✅ ingest_id = {ingest_ids[(device_type, args.device_id)]}")
 
     print(f"\n[3/4] Loading processed data...")
     transformed = {device_type: {args.device_id: {"data": parsed}}}
-    load_processed_data(transformed, ingest_ids, fetched_at)  # doesn't raise on device-level failure, by design — see [4/4]
+    load_processed_data(transformed, ingest_ids, fetched_at)  # doesn't raise on device-level failure, by design -- see [4/4]
 
     print(f"\n[4/4] Verifying raw.pipeline + row counts...")
     conn = connect_db()

@@ -13,7 +13,7 @@ Usage, per device, inside load.py:
         end_run(conn, run_id, status="failed", error_message=str(e))
         raise
 
-Each call commits on its own — this table is meant to survive even when the device's own data load rolls back.
+Each call commits on its own -- this table is meant to survive even when the device's own data load rolls back.
 So a failure is still visible afterward.
 """
 

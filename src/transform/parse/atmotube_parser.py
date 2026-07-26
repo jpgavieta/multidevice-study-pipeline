@@ -2,17 +2,12 @@
 """
 Parses raw Atmotube API responses (from extract/clients/atmotube_client.py,
 live or replayed via backfill_atmotube.py) into row-dicts matching
-atmotube.readings — ready for execute_values(), same shape fitbit_parser.py emits.
+atmotube.readings -- ready for execute_values(), same shape fitbit_parser.py emits.
 
-date is already true UTC ISO 8601 — no explicit parsing happens here or in
-load.py; the raw string is passed straight through to psycopg2, and Postgres
-does the text -> TIMESTAMPTZ cast implicitly on insert into recorded_at.
+date is already true UTC ISO 8601 -- no explicit parsing happens here or in load.py; the raw string is passed straight through to psycopg2, and Postgres does the text -> TIMESTAMPTZ cast implicitly on insert into recorded_at.
 
-latitude/longitude are kept as plain float fields on each row-dict (NOT built
-into a geometry object here) — load.py's _build_location() turns them into an
-EWKT point string at insert time (wrapped in ST_GeomFromEWKT(...) via the
-WKT_COLUMNS mapping in _upsert_rows()), so both keys survive this parser only
-to be popped by load.py's _prepare_atmotube_rows() once the geometry's built.
+latitude/longitude are kept as plain float fields on each row-dict (NOT built into a geometry object here) 
+load.py's _build_location() turns them into an EWKT point string at insert time (wrapped in ST_GeomFromEWKT(...) via the WKT_COLUMNS mapping in _upsert_rows()), so both keys survive this parser only to be popped by load.py's _prepare_atmotube_rows() once the geometry's built.
 """
 from datetime import datetime
 from zoneinfo import ZoneInfo

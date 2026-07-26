@@ -1,0 +1,13 @@
+[Unit]
+Description=MultiDevice ETL Pipeline Scheduler
+
+[Service]
+ExecStart=/home/yul/miniforge3/envs/multidevice_dataviz/bin/python /home/yul/Projects/Repos/multidevice-datakit/src/main.py
+WorkingDirectory=/home/yul/Projects/Repos/multidevice-datakit 
+EnvironmentFile=/home/yul/Projects/Repos/multidevice-datakit/deploy/.env
+Restart=on-failure
+RestartSec=10
+User=yul
+
+[Install]
+WantedBy=multi-user.target

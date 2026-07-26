@@ -44,4 +44,6 @@ deploy/grafana/grafana-data/
 
 *.egg-info
 
-.gitattributes   
+.gitattributes 
+
+deploy/aryan-test1/
