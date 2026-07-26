@@ -14,7 +14,7 @@ Built for a multi-site study tracking environmental exposure (Atmotube air quali
 - *Ingests*: Pulls each device's cloud API (Atmotube, Google Health/Fitbit) via threaded per-device requests, rate-limit aware. Scheduling runs inside `src/main.py` -- a single daily job (APScheduler `BlockingScheduler` + `CronTrigger`, UTC) wrapping the full extract → load_raw → transform → load_processed sequence, with tenacity retry on run-level failures and Slack alerting via `notify_failure()`. Schedule time is config-driven via `PIPELINE_RUN_HOUR`/`PIPELINE_RUN_MINUTE` in `deploy/.env`.
 - *Processes*: Standardizes and validates per device type -- parsing raw API responses into row-dicts matching each destination table's columns exactly, ready for insert.
 - *Stores*: Maintains a PostgreSQL + PostGIS database (via Docker) for raw + processed data, with upserts (`ON CONFLICT ... DO UPDATE`) so re-pulling overlapping date ranges is safe, and device/participant assignment tracking (`config/study_registry.yml`) to reconcile data across a rotating-device study design.
-- *Visualizes*: Provides non-technical abilities to visualize the data -- internal-facing DB dashboard via Grafana (planned -- service is defined in `docker-compose.yml` but not yet provisioned) and public-facing analytical reports via GitHub Pages (`docs/`) -- separate from the automated pipeline.
+- [TODO]: *Visualizes*: Provides non-technical abilities to visualize the data -- internal-facing DB dashboard via Grafana (service is defined in `docker-compose.yml` but not yet implemented)
 
 2. **Why does this exists?**
 
