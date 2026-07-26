@@ -1,14 +1,14 @@
 # src/transform/scripts/test_parser.py
 """
 Debug script for device parsers + registries (transform/parse/*_parser.py, transform/register/*_registry.py). 
-Feeds a real captured API pull (saved via extract/scripts/inspect_data.py --full) through parser.parse() DIRECTLY —
-bypassing transform_device_data()'s try/except, so a broken parser or registry rule raises immediately here, not silently skipped and printed over.
+Feeds a real captured API pull (saved via extract/scripts/inspect_data.py --full) through parser.parse() DIRECTLY.
+bypasses transform_device_data()'s try/except, so a broken parser or registry rule raises immediately here, not silently skipped and printed over.
 
 Not part of the pipeline. 
 
 Run manually after touching a parser or registry.
 
-Device type is resolved automatically from config/study_registry.yml — no --device-type flag needed.
+Device type is resolved automatically from config/study_registry.yml. No --device-type flag needed.
 
 USAGE:
 python -m transform.scripts.test_parser fitbit_01
@@ -76,12 +76,12 @@ FITBIT_KNOWN_TABLES = {
 
 def _check_rows(table_name: str, rows: list, required_keys: set):
     assert isinstance(rows, list), f"{table_name} should be a list, got {type(rows)}"
-    assert rows, f"{table_name} is present but empty — should have been omitted from the result entirely"
+    assert rows, f"{table_name} is present but empty -- should have been omitted from the result entirely"
     for i, row in enumerate(rows):
         missing = required_keys - row.keys()
         assert not missing, f"{table_name}[{i}] missing keys: {missing}"
         extra = row.keys() - required_keys
-        assert not extra, f"{table_name}[{i}] has unexpected keys: {extra} — parser/registry drift?"
+        assert not extra, f"{table_name}[{i}] has unexpected keys: {extra} -- parser/registry drift?"
         assert row["recorded_at" if "recorded_at" in row else "started_at"] is not None, \
             f"{table_name}[{i}] has no start timestamp"
         assert "ended_at" in row, f"{table_name}[{i}] missing 'ended_at' key (None is fine, missing key is not)"
@@ -95,12 +95,12 @@ def test_fitbit(device_id: str, timezone: str | None, raw_data: dict) -> None:
     )
 
     if not timezone:
-        sys.exit(f"❌ '{device_id}' has no 'timezone' set in study_registry.yml — required for daily-grain fields.")
+        sys.exit(f"❌ '{device_id}' has no 'timezone' set in study_registry.yml -- required for daily-grain fields.")
 
     result = fitbit_parser.parse(raw_data, device_id, timezone)
 
     assert isinstance(result, dict), f"parse() should return a dict, got {type(result)}"
-    assert result, "parse() returned an empty dict — no tables produced at all. Check the input capture."
+    assert result, "parse() returned an empty dict -- no tables produced at all. Check the input capture."
 
     unexpected_tables = result.keys() - FITBIT_KNOWN_TABLES.keys() - {"profile"}
     assert not unexpected_tables, f"parse() returned unrecognized table(s): {unexpected_tables}"
@@ -117,7 +117,7 @@ def test_fitbit(device_id: str, timezone: str | None, raw_data: dict) -> None:
         print(f"  ✅ profile: {profile}")
 
     # Cross-check: every data_type with data in the capture should be accounted for
-    # somewhere — FITBIT_REGISTRY, BESPOKE, DROPPED, or UNMAPPED — never silently
+    # somewhere -- FITBIT_REGISTRY, BESPOKE, DROPPED, or UNMAPPED -- never silently
     # falling into parse()'s "unrecognized" branch.
     known_data_types = set(FITBIT_REGISTRY) | BESPOKE_DATA_TYPES | DROPPED_DATA_TYPES | UNMAPPED_DATA_TYPES
     for data_type, payload in raw_data.items():
@@ -136,7 +136,7 @@ def test_atmotube(device_id: str, timezone: str | None, raw_data: dict) -> None:
     from transform.register.atmotube_registry import ATMOTUBE_REGISTRY
 
     if not timezone:
-        print(f"  ⚠️ '{device_id}' has no 'timezone' in study_registry.yml — fine as long as every 'date' "
+        print(f"  ⚠️ '{device_id}' has no 'timezone' in study_registry.yml -- fine as long as every 'date' "
             f"value in the capture already carries a UTC offset.")
 
     base_keys = {"device_id", "recorded_at", "latitude", "longitude"}
@@ -150,22 +150,22 @@ def test_atmotube(device_id: str, timezone: str | None, raw_data: dict) -> None:
     rows = result["readings"]
     assert isinstance(rows, list), f"'readings' should be a list, got {type(rows)}"
     if not rows:
-        print("  ⚠️ 'readings' is empty — capture had no merged_data records to parse.")
+        print("  ⚠️ 'readings' is empty -- capture had no merged_data records to parse.")
         return
 
     for i, row in enumerate(rows):
         missing = required_reading_keys - row.keys()
         assert not missing, f"readings[{i}] missing keys: {missing}"
         extra = row.keys() - required_reading_keys
-        assert not extra, f"readings[{i}] has unexpected keys: {extra} — registry/schema drift?"
-        assert row["recorded_at"] is not None, f"readings[{i}] has no recorded_at — check 'date' field in capture"
+        assert not extra, f"readings[{i}] has unexpected keys: {extra} -- registry/schema drift?"
+        assert row["recorded_at"] is not None, f"readings[{i}] has no recorded_at -- check 'date' field in capture"
         assert row["device_id"] == device_id, f"readings[{i}] device_id mismatch"
 
-    # Duplicate timestamp check — mirrors inspect_data.py's chunk/cursor-boundary warning
+    # Duplicate timestamp check -- mirrors inspect_data.py's chunk/cursor-boundary warning
     recorded_ats = [r["recorded_at"] for r in rows]
     dupes = len(recorded_ats) - len(set(recorded_ats))
     if dupes:
-        print(f"  ⚠️ {dupes} duplicate recorded_at value(s) — check chunk/cursor-page boundary logic upstream.")
+        print(f"  ⚠️ {dupes} duplicate recorded_at value(s) -- check chunk/cursor-page boundary logic upstream.")
 
     print(f"  ✅ readings: {len(rows)} row(s), keys OK")
 

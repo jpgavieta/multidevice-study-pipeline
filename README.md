@@ -4,17 +4,17 @@
 > This is an evolving research data pipeline, not a finished product. 
 > Structure and scope are actively changing as new devices and features come online.
 
-A Python-based, portable, and customizable pipeline for pulling, standardizing, and storing multi-device research data — combining an
+A Python-based, portable, and customizable pipeline for pulling, standardizing, and storing multi-device research data -- combining an
 **API scheduler**, an **ETL pipeline**, and a **database deployer** into one lightweight data warehouse.
 
-Built for a multi-site study tracking environmental exposure (Atmotube air quality sensors) and biometric data (Fitbit / Google Health) across rotating device assignments and multiple participants — but designed to be extended to any new device type with its own API and parser.
+Built for a multi-site study tracking environmental exposure (Atmotube air quality sensors) and biometric data (Fitbit / Google Health) across rotating device assignments and multiple participants -- but designed to be extended to any new device type with its own API and parser.
 
 1. **What does this project do?**
 
-- *Ingests*: Pulls each device's cloud API (Atmotube, Google Health/Fitbit) via threaded per-device requests, rate-limit aware. Scheduling is config-driven (`config/schedule.yml`) — the APScheduler wiring itself (`src/scheduler/`) isn't built yet, see Structure below.
-- *Processes*: Standardizes and validates per device type — parsing raw API responses into row-dicts (not DataFrames — see note below) matching each destination table's columns exactly, ready for insert.
+- *Ingests*: Pulls each device's cloud API (Atmotube, Google Health/Fitbit) via threaded per-device requests, rate-limit aware. Scheduling is config-driven (`config/schedule.yml`) -- the APScheduler wiring itself (`src/scheduler/`) isn't built yet, see Structure below.
+- *Processes*: Standardizes and validates per device type -- parsing raw API responses into row-dicts (not DataFrames -- see note below) matching each destination table's columns exactly, ready for insert.
 - *Stores*: Maintains a PostgreSQL + PostGIS database (via Docker) for raw + processed data, with upserts (`ON CONFLICT ... DO UPDATE`) so re-pulling overlapping date ranges is safe, and device/participant assignment tracking (`config/participants.yml`) to reconcile data across a rotating-device study design.
-- *Visualizes*: Provides non-technical abilities to visualize the data — internal-facing DB dashboard via Grafana (planned — service is defined in `docker-compose.yml` but not yet provisioned) and public-facing analytical reports via GitHub Pages (`docs/`) — separate from the automated pipeline.
+- *Visualizes*: Provides non-technical abilities to visualize the data -- internal-facing DB dashboard via Grafana (planned -- service is defined in `docker-compose.yml` but not yet provisioned) and public-facing analytical reports via GitHub Pages (`docs/`) -- separate from the automated pipeline.
 
 2. **Why does this exists?**
 
@@ -25,7 +25,7 @@ Built specifically for a small-scale research (sole maintainer, some dozen devic
 
 ## Data Flow from Multiple Devices
 
-***Extract → Load:***  `load.py`'s `__main__` orchestrates the full run: it calls `extract.extract_all_devices()` to pull raw payloads per device, and `load_raw_data()` populates into `raw.ingests` — returns an `ingest_id` per physical device.
+***Extract → Load:***  `load.py`'s `__main__` orchestrates the full run: it calls `extract.extract_all_devices()` to pull raw payloads per device, and `load_raw_data()` populates into `raw.ingests` -- returns an `ingest_id` per physical device.
 
 ***Extract → Transform → Load:*** `transform.transform_device_data()` runs each device's payload through its device type's registered parser (`transform/parse/`, driven by `transform/register/`).`load_processed_data()` to upsert the resulting row-dicts into the destination tables (`fitbit.*` / `atmotube.*`). 
 
@@ -52,14 +52,15 @@ Logs a new row in `raw.pipeline` per device via `general/piepline_logger.py` so 
 │
 ├── deploy/                    ## DB+VIZ DEPLOYMENT
 │   ├── docker-compose.yml          # Postgres+PostGIS + Grafana as services
+│   ├── .env                        # gitignored service creds
 │   ├── postgres/
 │   │   ├── test_db.sh              # throwaway container DB for pipeline test-runs
 │   │   └── init/
 │   │       ├── 00_extensions.sql   # enables postGIS + btree_gist
 │   │       ├── 01_schemas.sql
-│   │       ├── 03_study.sql        # study.registry — append/upsert log of participants-to-device (users) assignments
-│   │       ├── 02_raw.sql          # raw.ingests / pipeline  — append-only log of raw api payoads (JSONB) and pipeline runs
-│   │       ├── 04_atmotube.sql     # atmotube.readings — adds GEOMETRY location col
+│   │       ├── 03_study.sql        # study.registry -- append/upsert log of participants-to-device (users) assignments
+│   │       ├── 02_raw.sql          # raw.ingests / pipeline  -- append-only log of raw api payoads (JSONB) and pipeline runs
+│   │       ├── 04_atmotube.sql     # atmotube.readings -- adds GEOMETRY location col
 │   │       ├── 05_fitbit.sql       # fitbit.readings / sleep_sessions  / exercise_sessions / profile
 │   │       └── ...                 # coming soon: whatsapp + google maps
 │   │
@@ -141,7 +142,7 @@ Logs a new row in `raw.pipeline` per device via `general/piepline_logger.py` so 
 │           └──test_pipeline.py    ##   NOT part of ETL pipeline (tests full wiring; read deloy/postgres/test_db.sh container for step-by-step guide)
 │~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 │
-└── docs/                          # GitHub Pages — datasheets and nb reports (+ html render helpers)
+└── docs/                          # GitHub Pages -- datasheets and nb reports (+ html render helpers)
     ├── __init__.py
     ├── manual.ipynb
     ├── stats.py
@@ -152,8 +153,8 @@ Logs a new row in `raw.pipeline` per device via `general/piepline_logger.py` so 
 ```
 
 **Planned, described above but not yet in the repo:**
-- `src/scheduler/` (`scheduler.py`, `jobs.py`) — APScheduler wiring that reads `config/schedule.yml` and calls the E→T→L pipeline on a cadence; `apscheduler` is already a `pyproject.toml` dependency
-- `notifications/notify.py` — email/Slack alerting on a failed `study.pipeline_runs` row
+- `src/scheduler/` (`scheduler.py`, `jobs.py`) -- APScheduler wiring that reads `config/schedule.yml` and calls the E→T→L pipeline on a cadence; `apscheduler` is already a `pyproject.toml` dependency
+- `notifications/notify.py` -- email/Slack alerting on a failed `study.pipeline_runs` row
 
 # How to dev setup (fresh machine / new teammate):
 
@@ -164,7 +165,7 @@ git clone <repo-url>
 cd multidevice_datakit
 ```
 
-## 2. Create the conda env — this also installs the package (via the -e .[docs] line inside environment.yml)
+## 2. Create the conda env -- this also installs the package (via the -e .[docs] line inside environment.yml)
 
 ```
 conda env create -f environment.yml

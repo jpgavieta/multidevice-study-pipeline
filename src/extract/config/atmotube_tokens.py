@@ -1,9 +1,9 @@
 # src/extract/config/atmotube_tokens.py
 """
 Atmotube Cloud static API key 
-    -   Each device has its own MAC addresses in config/devices.yml (as !ENV variables) (NO GENERATED TOKENS)
+    -   Each device has its own MAC addresses in config/study_registry.yml (as !ENV variables) (NO GENERATED TOKENS)
     -   API key is shared across all devices per study site  client (client_id/client_secret) is shared across all devices
-NOTE: When a new study site with a new API key is dispatched update sites in #config/devices.yml
+NOTE: When a new study site with a new API key is dispatched update sites in #config/study_registry.yml
 """
 
 import json
@@ -21,7 +21,7 @@ def get_api_key(site: str, key_path: str | None = None) -> str:
     """
     Returns the Atmotube API key for a given site.
     key_path, if provided, overrides the default filename convention
-    (SECRETS_DIR / f"api_key_{site}.json") — pass devices.yml's sites[site]['atmotube_api_key_path'] here once that's wired up.
+    (SECRETS_DIR / f"api_key_{site}.json") — pass study_registry.yml's sites[site]['atmotube_api_key_path'] here once that's wired up.
     """
     path = Path(key_path) if key_path else SECRETS_DIR / f"api_key_{site}.json"
     if not path.exists():

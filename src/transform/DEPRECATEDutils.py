@@ -112,8 +112,7 @@ def parse_jsonblob_csv(df, json_col=None, keep_original_cols=None):
 
 def detect_utc_col(df, sample_size=50):
     """
-    Detect all datetime-like columns, rank them by legitimacy,
-    rename the best one to 'datetime', and move it to the first column.
+    Detect all datetime-like columns, rank them by legitimacy, rename the best one to 'datetime', and move it to the first column.
     Returns the updated DataFrame and the detected column name.
     """
     utc_pattern = re.compile(

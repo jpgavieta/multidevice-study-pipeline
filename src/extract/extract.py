@@ -10,7 +10,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from threading import Lock
 
 from general.study_registry import load_registry
-from general.run_logger import last_successful_fetch
+from general.pipeline_logger import last_successful_fetch
 
 from general.db_connect import connect_db
 
@@ -76,7 +76,7 @@ def extract_all_devices(
     Pulls raw API data for every device in the registry: device_type -> device_id -> {"payload": ..., "ingest_method": ...}.
 
     Each device's date range is computed individually via get_date_range(). 
-    The start date prefers that device's last successful raw.pipeline run (incremental pull, checked via run_logger.last_successful_fetch) over study_registry.yml's static start_date — so a
+    The start date prefers that device's last successful raw.pipeline run (incremental pull, checked via pipeline_logger.last_successful_fetch) over study_registry.yml's static start_date — so a
     device that's already been running just re-pulls from its last success forward, and only a brand-new device (no successful run yet) falls back to the yml's start_date for a full
     backfill.
 

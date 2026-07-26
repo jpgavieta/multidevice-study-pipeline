@@ -1,7 +1,7 @@
 # src/general/db_connect.py
 """
 Single shared DB connection factory. 
-(Both extract.py and load.py import connect_db() from here)
+Both extract.py and load.py import connect_db() from here.
 """
 
 import os

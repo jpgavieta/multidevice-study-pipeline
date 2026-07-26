@@ -1,8 +1,7 @@
-# src/general/run_logger.py
+# src/general/pipeline_logger.py
 """
-Writes one row per device per pipeline run into raw.pipeline, so
-failures/successes/durations are queryable after the fact instead of only
-visible in whatever the run happened to print to stdout.
+Writes one row per device per pipeline run into raw.pipeline.
+So failures/successes/durations are queryable after the fact, not only visible in whatever the run happened to print to stdout.
 
 Usage, per device, inside load.py:
 
@@ -14,8 +13,8 @@ Usage, per device, inside load.py:
         end_run(conn, run_id, status="failed", error_message=str(e))
         raise
 
-Each call commits on its own — this table is meant to survive even when the
-device's own data load rolls back, so a failure is still visible afterward.
+Each call commits on its own — this table is meant to survive even when the device's own data load rolls back.
+So a failure is still visible afterward.
 """
 
 from datetime import datetime, timezone

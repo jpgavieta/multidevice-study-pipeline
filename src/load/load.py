@@ -16,6 +16,15 @@ E.g. If device 9 of 13 has a bad record, devices 1-8's (already correctly parsed
     Only device 9's transaction rolls back and gets logged as failed in study.pipeline_runs.
     TRADE-OFF: 13 commits instead of 1 for not losing 12 devices' worth of correctly-loaded data over one bad device.
 
+load_raw_data() applies the SAME failure-isolation philosophy, but in two zones:
+    1. Row-building (per device): if one device's payload can't be serialized/built into
+       a row (e.g. json.dumps() fails on a malformed payload), that device is skipped and
+       logged — it does NOT block the other devices' rows from being batched and inserted.
+    2. The batch INSERT itself: still ONE execute_values() call, ONE commit, for whatever
+       rows built cleanly. If THIS fails (e.g. DB connection drop mid-write), that's a
+       systemic failure, not a one-device problem — it still rolls back and re-raises,
+       so main.py's retry/notify layer is the one responsible for handling it.
+
 NOTE: fitbit.readings -> this table now absorbs what used to be a separate fitbit.states table. 
     Categorical/state-type records (e.g. "activity-level", "sedentary-period") route through the SAME ("fitbit", "readings") destination as scalar metrics. See fitbit_registry.py for which data_types are which.
     State rows populate value_text (mirroring the state already stored in tag — tag is kept, not cleared, since it's part of the UNIQUE constraint and clearing it would break upsert-safety on re-pulls) 
@@ -32,7 +41,7 @@ import psycopg2
 from psycopg2.extras import execute_values
 from dotenv import load_dotenv
 
-from general.run_logger import start_run, end_run
+from general.pipeline_logger import start_run, end_run
 from general.db_connect import connect_db
 
 # ============================================================================================================
@@ -68,8 +77,8 @@ WKT_COLUMNS = {
 
 def _build_location(latitude, longitude) -> str | None:
     """
-    Builds an EWKT point string for atmotube.readings.location, e.g.
-    'SRID=4326;POINT(88.3639 22.5726)' — note WKT/EWKT order is (lon, lat), not (lat, lon);
+    Builds an EWKT point string for atmotube.readings.location, 
+    e.g. 'SRID=4326;POINT(88.3639 22.5726)' — note WKT/EWKT order is (lon, lat), not (lat, lon);
     that axis-order mixup is the classic geometry bug. This function is to avoid making by hand at every call site.
     Returns None if either coordinate is missing (e.g. GPS fix not acquired for that reading)
     — PostGIS geometry columns are nullable for this reason.
@@ -79,26 +88,64 @@ def _build_location(latitude, longitude) -> str | None:
     return f"SRID=4326;POINT({longitude} {latitude})"
 
 
-def load_raw_data(all_data: dict[str, dict[str, dict]]) -> tuple[dict[tuple[str, str], int], datetime]:
+def load_raw_data(all_data: dict[str, dict[str, dict]]) -> tuple[dict[tuple[str, str], int], datetime, list[str]]:
     """
     Pushes raw API payloads into raw.ingests, one row per device per pull.
     all_data shape: { device_type: { device_id: {"payload": ..., "ingest_method": ...} } }
     Matches extract.py's extract_all_devices() output. For CSV backfills (extract/scripts/backfill_atmotube.py).
     Same shape applies with ingest_method="csv_manual".
 
-    Returns { (device_type, device_id): ingest_id } so load_processed_data() can stamp every processed row with the raw.ingests row it came from.
+    FAILURE ISOLATION (row-building only): each device's row is built inside its own try/except. 
+    A device whose payload can't be serialized (e.g. json.dumps() fails on a malformed payload) is skipped and logged 
+    — it does NOT block the other devices' rows from being batched and inserted. 
+    This mirrors the per-device isolation already used in load_processed_data(), applied one step earlier in the pipeline.
+
+    The actual DB write is still ONE execute_values() call / ONE commit for whatever rows built cleanly 
+    — that batch-insert efficiency is intentional and unchanged.
+    If THAT call itself fails (e.g. connection drop mid-write), it's treated as a systemic failure: rollback + re-raise, same as before. 
+    That's deliberately NOT aught here 
+    — main.py's retry/notify layer owns that case.
+
+    Returns
+    -------
+    ingest_ids : dict
+        { (device_type, device_id): ingest_id } for every device whose row was built
+        AND inserted successfully. A skipped/failed device simply has no key here —
+        load_processed_data() already treats a missing ingest_id as "skip this device"
+        (see its `if ingest_id is None: ... continue` branch), so no downstream change
+        is needed to support this.
+    fetched_at : datetime
+        Shared timestamp for this pull batch.
+    skipped : list[str]
+        Human-readable reasons for any device that failed to build a row (e.g.
+        "fitbit/ABC123: payload not JSON-serializable: ..."). Empty if nothing was
+        skipped. main.py can log/notify on this list without it ever having been
+        raised as an exception.
     """
     fetched_at = datetime.now(timezone.utc)
     keys, rows = [], []
+    skipped: list[str] = []
+
     for device_type, devices in all_data.items():
         for device_id, entry in devices.items():
+            # --- Zone 1: per-device row-building, isolated ---
+            try:
+                payload_json = json.dumps(entry["payload"])
+                row = (device_type, device_id, entry["ingest_method"], fetched_at, payload_json)
+            except Exception as e:
+                msg = f"{device_type}/{device_id}: failed to build raw row ({e})"
+                print(f"   ⚠️ {msg} — skipped")
+                skipped.append(msg)
+                continue
+
             keys.append((device_type, device_id))
-            rows.append((device_type, device_id, entry["ingest_method"], fetched_at, json.dumps(entry["payload"])))
+            rows.append(row)
 
     if not rows:
         print("⚠️ No raw data to load.")
-        return {}, fetched_at
+        return {}, fetched_at, skipped
 
+    # --- Zone 2: the batch write itself, NOT isolated — systemic failure, re-raise ---
     conn = connect_db()
     try:
         with conn.cursor() as cur:
@@ -110,17 +157,20 @@ def load_raw_data(all_data: dict[str, dict[str, dict]]) -> tuple[dict[tuple[str,
                 fetch=True,
             )
         conn.commit()
-        print(f"✅ Loaded {len(rows)} raw record(s) into raw.ingests")
+        print(f"✅ Loaded {len(rows)} raw record(s) into raw.ingests"
+            + (f" ({len(skipped)} device(s) skipped at row-build)" if skipped else ""))
     except Exception as e:
         conn.rollback()
-        print(f"❌ Raw load failed: {e}")
+        print(f"❌ Raw batch insert failed: {e}")
         raise
     finally:
         conn.close()
 
     # Postgres processes/returns multi-row VALUES+RETURNING in input order, so this
     # zip is safe — each returned id lines up with the key at the same position.
-    return {key: returned_row[0] for key, returned_row in zip(keys, returned)}, fetched_at
+    ingest_ids = {key: returned_row[0] for key, returned_row in zip(keys, returned)}
+    return ingest_ids, fetched_at, skipped
+
 
 def _upsert_rows(cur, table: str, rows: list[dict], conflict_cols: tuple, returning: Optional[tuple] = None) -> list[dict]:   
     """
@@ -164,8 +214,8 @@ def _upsert_rows(cur, table: str, rows: list[dict], conflict_cols: tuple, return
 
 def _prepare_atmotube_rows(rows: list[dict]) -> list[dict]:
     """
-    Converts each atmotube row's plain latitude/longitude fields into the 'location' EWKT string atmotube.readings actually stores, and drops the
-    two lat/lon keys (they're not real columns on that table — see atmotube_parser.py, which emits them only so this function has something to build the geometry from).
+    Converts each atmotube row's plain latitude/longitude fields into the 'location' EWKT string atmotube.readings actually stores.
+    Drops the two lat/lon keys (real columns on the table; see atmotube_parser.py, it emits them only so this function has something to build the geometry from).
     """
     prepared = []
     for row in rows:
@@ -267,7 +317,7 @@ def _load_one_device(cur, device_type: str, device_id: str, data: dict, ingest_i
 
     return skip_reasons
 
-    return skipped
+
 def load_processed_data(
     transformed: dict[str, dict[str, dict]],
     ingest_ids: dict[tuple[str, str], int],
@@ -277,7 +327,7 @@ def load_processed_data(
     Inserts transform.py's output into the processed schema tables (fitbit.*, atmotube.*).
     Commits once PER DEVICE, not once for the whole batch — see module docstring.
     Also logs one study.pipeline_runs row per device (start/finish/status/error),
-    via general.run_logger, so failures are visible without reading stdout.
+    via general.pipeline_logger, so failures are visible without reading stdout.
 
     A device with no ingest_id (its raw.ingests insert failed/skipped (AKA load_raw_data()) gets skipped entirely here rather than loaded with a NULL
     ingest_id: a processed row with no traceable raw source is worse than no row.
@@ -301,7 +351,7 @@ def load_processed_data(
                 ingest_id = ingest_ids.get((device_type, device_id))
                 if ingest_id is None:
                     print(f"⚠️ No ingest_id for {device_type}/{device_id} "
-                        f"(raw.ingests insert likely failed) — skipping processed load.")
+                        f"(raw.ingests insert likely failed or skipped) — skipping processed load.")
                     continue
 
                 data = entry.get("data", {})
@@ -322,7 +372,6 @@ def load_processed_data(
                     print(f"❌ Load failed for {device_type}/{device_id}: {e}")
                     # Deliberately NOT re-raised — one device's failure shouldn't stop
                     # the rest of the batch from loading. See module docstring.
-                    # one device's failure shouldn't stop  the rest of the batch from loading
     finally:
         conn.close()
 
@@ -332,6 +381,6 @@ if __name__ == "__main__":
     from transform.transform import transform_device_data
 
     raw = extract_all_devices()
-    ingest_ids, fetched_at = load_raw_data(raw)
+    ingest_ids, fetched_at, skipped = load_raw_data(raw)
     transformed = transform_device_data(raw)
     load_processed_data(transformed, ingest_ids, fetched_at)

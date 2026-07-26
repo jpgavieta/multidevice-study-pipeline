@@ -72,7 +72,7 @@ def _normalize_mac(mac: str) -> str:
 
 def _get_auth(device: dict) -> tuple[str, dict]:
     """Returns (normalized_mac, headers) — shared setup for any Atmotube call."""
-    mac = _normalize_mac(device["mac"])
+    mac = _normalize_mac(device["access"])
     headers = {"X-Api-Key": get_atmotube_api_key(device["site"])}
     return mac, headers
 

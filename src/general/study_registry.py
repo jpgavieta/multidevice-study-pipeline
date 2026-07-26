@@ -98,15 +98,15 @@ def sync_device_users(conn: "psycopg2.extensions.connection", rows: list[dict[st
     """
     Upsert device-user periods, keyed on (device_id, user_start) -- uq_device_period.
 
-    -   New (device_id, user_start) combo  -> INSERT a brand-new history row.
+    -   New (device_id, user_start) combo   -> INSERT a brand-new history row.
     -   Existing combo, user_end unchanged  -> no-op (idempotent re-run).
     -   Existing combo, user_end changed    -> UPDATE only user_end + last_updated
                                                 (e.g. closing out an open device
                                                 user period).
 
-    participant_site, device_site, recruit_start/end, device_id, and user_start
-    are NEVER touched on existing rows -- those are historical facts about that
-    period. Fix past mistakes manually if needed.
+    participant_site, device_site, recruit_start/end, device_id, and user_start are NEVER touched on existing rows 
+    -- those are historical facts about that period. 
+    Fix past mistakes manually if needed.
     """
     if not rows:
         return
