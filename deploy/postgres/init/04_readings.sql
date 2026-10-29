@@ -35,14 +35,14 @@ CREATE TABLE IF NOT EXISTS readings.atmotube2 ( -- wide hypertable
 
     interpolated_cols   TEXT[], -- were any columns adjusted?
     ingest_id           BIGINT NOT NULL REFERENCES raw.ingests(id),
-    UNIQUE (usr_id, recorded_at) 
+    UNIQUE (usr_id, recorded_at), 
 
     CONSTRAINT atmotube2_usr_fk     FOREIGN KEY (usr_id)    REFERENCES registry.usr(id)
 ) WITH (
         tsdb.hypertable,
         tsdb.partition_column = 'recorded_at',
         tsdb.segmentby = 'usr_id',
-        tsdb.orderby = 'time DESC' -- newest to oldest
+        tsdb.orderby = 'recorded_at DESC' -- newest to oldest
 );
 
 CREATE OR REPLACE VIEW readings.atmotube2_dashboard AS -- filter rows per user, and know its participant, device, and account/access id's
@@ -51,7 +51,7 @@ SELECT
     u.ppt_id,
     u.dvc_id,
     u.acc_id,
-    u.site,
+    u.site
 FROM readings.atmotube2 AS a
 JOIN registry.usr AS u
     ON u.id = a.usr_id;

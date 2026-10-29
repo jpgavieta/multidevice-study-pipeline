@@ -48,7 +48,7 @@ CREATE TABLE IF NOT EXISTS  registry.usr (  -- user = participant + device + acc
     FOREIGN KEY (ppt_id, site) REFERENCES registry.ppt(id, site),
     FOREIGN KEY (dvc_id, type) REFERENCES registry.dvc(id, type),
     FOREIGN KEY (acc_id, type) REFERENCES registry.acc(id, type),
-    UNIQUE (dvc_id, started_at),             -- upsert key only; overlap is handled below
+    UNIQUE (id, type, started_at),             -- upsert key only; overlap is handled below
     CHECK (ended_at IS NULL OR ended_at > started_at),
     CONSTRAINT no_overlap_per_device  EXCLUDE USING gist (
         dvc_id WITH =, daterange(started_at, COALESCE(ended_at, 'infinity'), '[)') WITH &&),
