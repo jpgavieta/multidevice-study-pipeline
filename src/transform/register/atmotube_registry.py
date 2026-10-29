@@ -1,4 +1,4 @@
-# transform/register/atmotube_registry.py
+# ./src/transform/register/atmotube_registry.py
 # standard_name must equal the real column name on atmotube.readings (src/load/schema/03_atmotube.sql) —
 # the parser writes these row-dicts straight through to execute_values(), no renaming happens at load time.
 

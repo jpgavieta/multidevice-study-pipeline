@@ -1,4 +1,4 @@
-# src/load/load.py
+# ./src/load/load.py
 """
 Pushes raw API payloads and processed data into the database.
     -   raw.ingests stores exact API responses as JSONB (JSONs as binary not text)
@@ -17,13 +17,13 @@ E.g. If device 9 of 13 has a bad record, devices 1-8's (already correctly parsed
     TRADE-OFF: 13 commits instead of 1 for not losing 12 devices' worth of correctly-loaded data over one bad device.
 
 load_raw_data() applies the SAME failure-isolation philosophy, but in two zones:
-    1. Row-building (per device): if one device's payload can't be serialized/built into
-       a row (e.g. json.dumps() fails on a malformed payload), that device is skipped and
-       logged — it does NOT block the other devices' rows from being batched and inserted.
-    2. The batch INSERT itself: still ONE execute_values() call, ONE commit, for whatever
-       rows built cleanly. If THIS fails (e.g. DB connection drop mid-write), that's a
-       systemic failure, not a one-device problem — it still rolls back and re-raises,
-       so main.py's retry/notify layer is the one responsible for handling it.
+    1.  Row-building (per device): if one device's payload can't be serialized/built into
+        a row (e.g. json.dumps() fails on a malformed payload), that device is skipped and
+        logged — it does NOT block the other devices' rows from being batched and inserted.
+    2.  The batch INSERT itself: still ONE execute_values() call, ONE commit, for whatever
+        rows built cleanly. If THIS fails (e.g. DB connection drop mid-write), that's a
+        systemic failure, not a one-device problem — it still rolls back and re-raises,
+        so main.py's retry/notify layer is the one responsible for handling it.
 
 NOTE: fitbit.readings -> this table now absorbs what used to be a separate fitbit.states table. 
     Categorical/state-type records (e.g. "activity-level", "sedentary-period") route through the SAME ("fitbit", "readings") destination as scalar metrics. See fitbit_registry.py for which data_types are which.

@@ -1,9 +1,7 @@
-# src/extract/scripts/backfill_atmotube.py
+# ./src/extract/scripts/backfill_atmotube.py
 """
-One-time backfill: converts Atmotube app-exported CSVs (May–June history, predating API/cloud pairing) into the same shape atmotube_client.py's
-extract_raw_data() produces from the live API — so transform/parsers/ atmotube.py only ever has to handle ONE input shape, regardless of source.
-
-Reads every *.csv in extract/config/secrets/atmotube/backfill/ (gitignored, not tracked — these are real participant data)
+One-time backfill: converts Atmotube app-exported CSVs (May–June history, predating API/cloud pairing) into the same shape atmotube2_client.py's extract_raw_data() produces from the live API — so transform/parsers/ atmotube.py only ever has to handle ONE input shape, regardless of source.
+Reads every *.csv in extract/config/secrets/atmotube2/backfill/ (gitignored, not tracked — these are real participant data)
 
 Filename convention (as exported by the Atmotube app):
     <MAC>_<start date DD-Mon-YYYY>_<end date DD-Mon-YYYY>.csv
@@ -11,13 +9,17 @@ Filename convention (as exported by the Atmotube app):
 
 One device can have multiple CSV files (multiple export windows) — these are combined into one continuous record set per MAC.
 
+Timestamps: the CSV's date column is LOCAL time, with the offset in its header (e.g. 'Date (UTC+05:30)').
+That offset is parsed from each file's header and used to convert to UTC, and the output uses the live API's format
+("2026-10-04T00:00:00Z"), so backfilled and live rows share one timestamp shape.
+
 Fields the CSV export does NOT include (legitimately null, not a bug):
     pm05_num, pm1_num, pm10_num, pm25_num, pm_size,
     satellites_fixed, satellites_in_view, snr0_19, snr20_49, snr50_99, snr_avg
 
 USAGE:
     python -m extract.scripts.backfill_atmotube                 # all devices found
-    python -m extract.scripts.backfill_atmotube --device atmotube_kol_01
+    python -m extract.scripts.backfill_atmotube --device atmo_01
     python -m extract.scripts.backfill_atmotube --dry-run        # no output file
 """
 
@@ -25,17 +27,20 @@ import argparse
 import json
 import re
 from pathlib import Path
-from datetime import timedelta
+from datetime import date, timedelta
 
 import pandas as pd
 
-from general.study_registry import load_registry
+from general.registry_builder import load_registry
+from general.utils_builder import resolve_usage
 
-BACKFILL_DIR = Path(__file__).resolve().parents[1] / "config" / "secrets" / "atmotube" / "backfill"
+# secrets/<type>/ where <type> is the registry device type (see atmotube2_tokens.TYPE_DIR)
+BACKFILL_DIR = Path(__file__).resolve().parents[1] / "config" / "secrets" / "atmotube2" / "backfill"
 
 FILENAME_RE = re.compile(r"^([A-Fa-f0-9]{12})_.*\.csv$")
 
-KOLKATA_UTC_OFFSET = timedelta(hours=5, minutes=30)
+# Matches the offset in a header like 'Date (UTC+05:30)' or 'Date (UTC-04:00)'
+UTC_OFFSET_RE = re.compile(r"UTC\s*([+-])\s*(\d{1,2})(?::?(\d{2}))?")
 
 # CSV column name -> API MeasurementItem field name.
 # Matched by header NAME, not position, in case some device exports differ
@@ -77,6 +82,16 @@ def _find_date_column(df: pd.DataFrame) -> str:
     raise ValueError(f"No 'Date (UTC...)' column found. Columns present: {list(df.columns)}")
 
 
+def _parse_utc_offset(date_col: str) -> timedelta:
+    """'Date (UTC+05:30)' -> timedelta(hours=5, minutes=30). Raises if the header has no parseable offset,
+    rather than guessing a timezone (a wrong guess would silently shift every row)."""
+    m = UTC_OFFSET_RE.search(date_col)
+    if not m:
+        raise ValueError(f"Could not parse a UTC offset from date column header: {date_col!r}")
+    sign = -1 if m.group(1) == "-" else 1
+    return sign * timedelta(hours=int(m.group(2)), minutes=int(m.group(3) or 0))
+
+
 def _map_charging(value) -> tuple:
     """Returns (charging: bool, recently_charged: bool)."""
     v = str(value).strip().lower()
@@ -87,15 +102,15 @@ def _map_charging(value) -> tuple:
     return False, False  # "no", blank, or unrecognized
 
 
-def _row_to_measurement(row: pd.Series, date_col: str) -> dict:
-    # Local Kolkata time (naive) -> shift to UTC to match the live API's convention
+def _row_to_measurement(row: pd.Series, date_col: str, utc_offset: timedelta) -> dict:
+    # Local time (naive, offset taken from this file's header) -> shift to UTC to match the live API's convention
     local_dt = pd.to_datetime(row[date_col])
-    utc_dt = local_dt - KOLKATA_UTC_OFFSET
+    utc_dt = local_dt - utc_offset
 
     charging, recently_charged = _map_charging(row.get("Charging"))
 
     record = {
-        "date": utc_dt.strftime("%Y-%m-%dT%H:%M:%S"),
+        "date": utc_dt.strftime("%Y-%m-%dT%H:%M:%SZ"),  # same format as the live API
         "charging": charging,
         "recently_charged": recently_charged,
         "motion": str(row.get("Motion", "")).strip().lower() == "yes",
@@ -138,8 +153,8 @@ def _load_one_csv(path: Path) -> pd.DataFrame:
             continue
         parts = line.split(",", maxsplit=n_cols - 1)
         if len(parts) < n_cols:
-            print(  f"  ⚠️ {path.name} line {i}: expected {n_cols} fields, got {len(parts)} "
-                    f"— padding with blanks")
+            print(f"  ⚠️ {path.name} line {i}: expected {n_cols} fields, got {len(parts)} "
+                  f"— padding with blanks")
             parts += [""] * (n_cols - len(parts))
         rows.append(parts)
 
@@ -189,8 +204,8 @@ def _dedupe_records(all_records: list) -> tuple:
             deduped.append(first)
         else:
             conflicts += 1
-            print(  f"  ❌ CONFLICTING values at {dt} across {len(group)} duplicate(s) — "
-                    f"keeping first, but this needs manual review:")
+            print(f"  ❌ CONFLICTING values at {dt} across {len(group)} duplicate(s) — "
+                  f"keeping first, but this needs manual review:")
             for g in group:
                 print(f"       {g}")
             deduped.append(first)  # arbitrary choice, flagged loudly above
@@ -215,13 +230,24 @@ def _group_files_by_mac() -> dict:
     return groups
 
 
+ATMOTUBE_REGISTRY_TYPE = "atmotube2"  # raw devices[].type in study_registry.yml is the MODEL (resolved usages say "atmotube")
+
+
 def _mac_to_device_id_map() -> dict:
-    devices = load_registry()["devices"]
+    """
+    {MAC: dvc_id} for every Atmotube. The MAC is NOT on the raw device entry: it is `access` on the resolved usage,
+    so each device is resolved first (latest usage is fine -- the MAC is the hardware's own id, whoever carries it).
+    """
+    config = load_registry()
     result = {}
-    for d in devices:
-        if d.get("type") != "atmotube":
+    for d in config["devices"]:
+        if d.get("type") != ATMOTUBE_REGISTRY_TYPE:
             continue
-        mac = d["access"].replace(":", "").replace("-", "").upper()
+        usage = resolve_usage(config, d["id"], date.today(), fallback_latest=True)
+        if usage is None:
+            print(f"  ⚠️ {d['id']}: not assigned under participants:, so there is no MAC to match CSVs against")
+            continue
+        mac = usage["access"].replace(":", "").replace("-", "").upper()
         result[mac] = d["id"]
     return result
 
@@ -235,16 +261,18 @@ def process_device(mac: str, files: list, mac_to_device: dict) -> dict:
     for path in files:
         df = _load_one_csv(path)
         date_col = _find_date_column(df)
+        utc_offset = _parse_utc_offset(date_col)  # per file: exports can differ in configured timezone
+        print(f"  {path.name}: {len(df)} row(s), local time {date_col.strip()} -> UTC")
         for _, row in df.iterrows():
-            all_records.append(_row_to_measurement(row, date_col))
+            all_records.append(_row_to_measurement(row, date_col, utc_offset))
 
     all_records.sort(key=lambda r: r["date"])
 
     deduped_records, conflicts = _dedupe_records(all_records)
     dropped = len(all_records) - len(deduped_records) - conflicts
     if dropped or conflicts:
-        print(  f"  De-duplication: {len(all_records)} raw rows -> {len(deduped_records)} unique "
-                f"({dropped} identical-duplicate row(s) dropped, {conflicts} conflicting timestamp(s) flagged above)")
+        print(f"  De-duplication: {len(all_records)} raw rows -> {len(deduped_records)} unique "
+              f"({dropped} identical-duplicate row(s) dropped, {conflicts} conflicting timestamp(s) flagged above)")
 
     print(f"  Total records: {len(deduped_records)}")
     if deduped_records:
@@ -262,7 +290,7 @@ def write_to_db(results: dict):
     Reshapes backfill results into the exact {device_type: {device_id: payload}} structure load_raw_data() already expects from a live extract_all_devices() run, and calls it directly.
     No separate DB logic here, so backfilled rows go through the identical insert path (and pulled_at convention: one now(UTC) timestamp for the whole batch) as live pulls.
 
-    Each payload matches atmotube_client.extract_raw_data()'s live-pull shape exactly: 
+    Each payload matches atmotube2_client.extract_raw_data()'s live-pull shape exactly: 
     {"mac", "start_date", "end_date", "merged_data", "raw_payload"}.
 
     A "source": "csv_backfill" key is added on top — harmless if transform reads fields via .get(), useful for later auditing (distinguishing
@@ -284,12 +312,14 @@ def write_to_db(results: dict):
             continue
 
         all_data["atmotube"][device_id] = {
-            "mac": mac,
-            "start_date": records[0]["date"][:10],
-            "end_date": records[-1]["date"][:10],
-            "merged_data": records,
-            "raw_payload": None,  # no live API response object for backfilled data
-            "source": "csv_backfill",
+            "payload": {
+                "mac": mac,
+                "start_date": records[0]["date"][:10],
+                "end_date": records[-1]["date"][:10],
+                "merged_data": records,
+                "raw_payload": None,  # no live API response object for backfilled data
+            },
+            "ingest_method": "csv_manual",
         }
 
     load_raw_data(all_data)
@@ -297,7 +327,7 @@ def write_to_db(results: dict):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--device", default=None, help="Only process this device_id")
+    parser.add_argument("--device", default=None, help="Only process this dvc_id (e.g. atmo_01)")
     parser.add_argument("--dry-run", action="store_true", help="Parse and report only, write nothing")
     parser.add_argument("--out", default=None, help="Output path for JSON (default: prints summary only)")
     parser.add_argument("--write-db", action="store_true", help="Insert into raw.ingests")
@@ -339,9 +369,9 @@ def main():
         out_path.write_text(json.dumps(results, indent=2))
         print(f"\n✅ Wrote {out_path}")
     else:
-        print(  "\nNo --out or --write-db given — results computed but not saved. "
-                "Pass --out <path.json> to inspect as a file, or --write-db to insert "
-                "into raw.ingests.")
+        print("\nNo --out or --write-db given — results computed but not saved. "
+            "Pass --out <path.json> to inspect as a file, or --write-db to insert "
+            "into raw.ingests.")
 
 
 if __name__ == "__main__":

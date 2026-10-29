@@ -55,7 +55,7 @@ load_dotenv(dotenv_path=ENV_PATH)
 # Kept as env vars (not hardcoded) so changing the run time doesn't require touching code -- just edit deploy/.env and restart the service
 # (`sudo systemctl restart multidevice_schedule.service`).
 # Falls back to 03:00 local server time if unset.
-RUN_HOUR = int(os.environ.get("PIPELINE_RUN_HOUR", 22))
+RUN_HOUR = int(os.environ.get("PIPELINE_RUN_HOUR", 22)) # UTC 22:00 = IST 03:30, these numbrs are just here for backup but source of truth is ./deplopy/.env
 RUN_MINUTE = int(os.environ.get("PIPELINE_RUN_MINUTE", 45))
 
 # --- Retry ---
@@ -71,7 +71,7 @@ RETRY_WAIT_SECONDS = int(os.environ.get("PIPELINE_RETRY_WAIT_SECONDS", 60))
 # The bot must be INVITED to SLACK_ALERT_CHANNEL in Slack itself (/invite @YourBotName),
 # or chat.postMessage will fail with "not_in_channel" even with a valid token.
 SLACK_BOT_TOKEN = os.environ.get("SLACK_BOT_TOKEN")
-SLACK_ALERT_CHANNEL = os.environ.get("SLACK_ALERT_CHANNEL", "#pipeline-notifications")
+SLACK_ALERT_CHANNEL = os.environ.get("SLACK_ALERT_CHANNEL", "#pipeline-alerts") 
 SLACK_API_URL = "https://slack.com/api/chat.postMessage"
 
 # ============================================================================================================

@@ -1,4 +1,4 @@
-# src/transform/scripts/test_parser.py
+# ./src/transform/scripts/test_parser.py
 """
 Debug script for device parsers + registries (transform/parse/*_parser.py, transform/register/*_registry.py). 
 Feeds a real captured API pull (saved via extract/scripts/inspect_data.py --full) through parser.parse() DIRECTLY.
@@ -20,7 +20,7 @@ import json
 import sys
 from pathlib import Path
 
-from general.study_registry import load_registry
+from general.registry_builder import load_registry
 
 DEFAULT_INPUT_DIRS = {
     "fitbit": Path("src/extract/config/secrets/fitbit"),
@@ -89,15 +89,15 @@ def _check_rows(table_name: str, rows: list, required_keys: set):
 
 
 def test_fitbit(device_id: str, timezone: str | None, raw_data: dict) -> None:
-    from transform.parse import fitbit_parser
-    from transform.register.fitbit_registry import (
+    from transform.parse import fitbit6_parser
+    from transform.register.fitbit6_registry import (
         FITBIT_REGISTRY, BESPOKE_DATA_TYPES, DROPPED_DATA_TYPES, UNMAPPED_DATA_TYPES,
     )
 
     if not timezone:
         sys.exit(f"❌ '{device_id}' has no 'timezone' set in study_registry.yml -- required for daily-grain fields.")
 
-    result = fitbit_parser.parse(raw_data, device_id, timezone)
+    result = fitbit6_parser.parse(raw_data, device_id, timezone)
 
     assert isinstance(result, dict), f"parse() should return a dict, got {type(result)}"
     assert result, "parse() returned an empty dict -- no tables produced at all. Check the input capture."

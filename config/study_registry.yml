@@ -1,219 +1,254 @@
-# config/study_registry.yml
-# top levels:
-#   -   devices:
-#   -   sites:
-#   -   participants:
-#
-# ================================================================================
+# ./config/study_registry.yml
 
-# DEVICES + access info
-#   -   Fitbit access -> google accounts are stored in ./extract/secrets/fitbit/.env.access
-#   -   Atmotube access -> hardware ids are stored in .extract/secrets/atmotube/.env.access
+# If any changes happen here, always update the './src/general/registry_builder.py' 
 
-devices:
-  - id: fitbit_01
-    type: fitbit
-    site: kolkata
-    timezone: Asia/Kolkata
-    start_date: 2026-06-15 
-    end_date: null
-    access: !ENV FITBIT_01_USER
-    notes: ""
+# ============================================================================================================
 
-  - id: fitbit_02
-    type: fitbit
-    site: kolkata
-    timezone: Asia/Kolkata
-    start_date: 2026-06-15 
-    end_date: null
-    access: !ENV FITBIT_02_USER
-    notes: ""
-
-  - id: fitbit_03
-    type: fitbit
-    site: kolkata
-    timezone: Asia/Kolkata
-    start_date: 2026-06-15
-    end_date: null
-    access: !ENV FITBIT_03_USER
-    notes: ""
-
-  - id: fitbit_04
-    type: fitbit
-    site: kolkata
-    timezone: Asia/Kolkata
-    start_date: 2026-06-15
-    end_date: null
-    access: !ENV FITBIT_04_USER
-    notes: ""
-
-  - id: fitbit_05
-    type: fitbit
-    site: kolkata
-    timezone: Asia/Kolkata
-    start_date: 2026-07-03
-    end_date: null
-    access: !ENV FITBIT_05_USER
-    notes: ""
-
-  - id: fitbit_06
-    type: fitbit
-    site: kolkata
-    timezone: Asia/Kolkata
-    start_date: 2026-06-15
-    end_date: null
-    access: !ENV FITBIT_06_USER
-    notes: ""
-
-  - id: atmotube_01
-    type: atmotube
-    site: kolkata
-    timezone: Asia/Kolkata
-    start_date: 2026-06-30  # NOTE: its day AFTER the CSV's last real row, not the API pairing date (for all 2026-07-13, except 07)
-    end_date: null
-    access: !ENV ATMOTUBE_01_MAC
-    notes: ""
-
-
-  - id: atmotube_02
-    type: atmotube
-    site: kolkata
-    timezone: Asia/Kolkata
-    start_date: 2026-07-03
-    end_date: null
-    access: !ENV ATMOTUBE_02_MAC
-    notes: ""
-
-  - id: atmotube_03
-    type: atmotube
-    site: kolkata
-    timezone: Asia/Kolkata
-    start_date: 2026-06-25
-    end_date: null
-    access: !ENV ATMOTUBE_03_MAC
-    notes: ""
-
-  - id: atmotube_04
-    type: atmotube
-    site: kolkata
-    timezone: Asia/Kolkata
-    start_date: 2026-07-03
-    end_date: null
-    access: !ENV ATMOTUBE_04_MAC
-    notes: ""
-
-  - id: atmotube_05
-    type: atmotube
-    site: kolkata
-    timezone: Asia/Kolkata
-    start_date: 2026-07-03  
-    end_date: null
-    access: !ENV ATMOTUBE_05_MAC
-    notes: ""
-
-  - id: atmotube_06
-    type: atmotube
-    site: kolkata
-    timezone: Asia/Kolkata
-    start_date: 2026-07-05 
-    end_date: null
-    access: !ENV ATMOTUBE_06_MAC
-    notes: ""
-
-# ================================================================================
-
-# STUDY SITES + API cred
-#   -   Fitbit ==> OAuth client (https://console.cloud.google.com/ Cloud Project ID: fitbit-multi-user-dev)
-#   -   Atmotube ==> API key (https://cloud.atmotube.com/ User access: sensailabs.research@gmail.com)
+# DEVICES + ACCESS cred
+#   -   fitbit6 access -> google accounts are stored in ./extract/secrets/fitbit6/.env.access 
+#                         file path: extract/config/secrets/atmotube2/api_key.json
+#                         web access: https://console.cloud.google.com/ Cloud Project ID: fitbit6-multi-user-dev
+#   -   atmotube2 access -> hardware ids are stored in .extract/secrets/atmotube2/.env.access 
+#                           file path: extract/config/secrets/fitbit6/client_secret.json 
+#                           web access: https://cloud.atmo.com/ Email: sensailabs.research@gmail.com
 
 sites:
   kolkata:
-    fitbit_client_secret_path: extract/config/secrets/fitbit/client_secret.json
-    atmotube_api_key_site: extract/config/secrets/atmotube/api_key_kolkata.json
-# toronto:
-#  fitbit_client_secret_path: extract/config/secrets/fitbit/client_secret.json  # same OAuth client, shared
-#  atmotube_api_key_site: extract/config/secrets/atmotube/... #could be shared? 
 
-# ================================================================================
+types:
+  - atmotube2: 
+  - fitbit6:
 
-# PARTICIPANTS + device users (which, when?)
+access:
+  - id: "0101"
+    type: atmotube2
+    cred: !ENV MAC_0101
+  - id: "0102"
+    type: atmotube2
+    cred: !ENV MAC_0102
+  - id: "0103"
+    type: atmotube2
+    cred: !ENV MAC_0103
+  - id: "0104"
+    type: atmotube2
+    cred: !ENV MAC_0104
+  - id: "0105"
+    type: atmotube2
+    cred: !ENV MAC_0105
+  - id: "0106"
+    type: atmotube2
+    cred: !ENV MAC_0106
+
+  - id: "0201"
+    type: fitbit6
+    cred: !ENV USR_0201
+  - id: "0202"
+    type: fitbit6
+    cred: !ENV USR_0202
+  - id: "0203"
+    type: fitbit6
+    cred: !ENV USR_0203
+  - id: "0204"
+    type: fitbit6
+    cred: !ENV USR_0204
+  - id: "0205"
+    type: fitbit6
+    cred: !ENV USR_0205
+  - id: "0206"
+    type: fitbit6
+    cred: !ENV USR_0206
+  - id: "0207"
+    type: fitbit6
+    cred: !ENV USR_0207
+  - id: "0208"
+    type: fitbit6
+    cred: !ENV USR_0208
+
+
+devices:
+  - id: atmo_01
+    type: atmotube2
+    start_date: 2026-06-30  # NOTE: its day AFTER the CSV's last real row, not the API pairing date (for all 2026-07-13, except 07)
+    end_date: null
+    notes: ""
+  - id: atmo_02
+    type: atmotube2
+    start_date: 2026-07-03
+    end_date: null
+    notes: ""
+  - id: atmo_03
+    type: atmotube2
+    start_date: 2026-06-25
+    end_date: null
+    notes: ""
+  - id: atmo_04
+    type: atmotube2
+    start_date: 2026-07-03
+    end_date: null
+    notes: ""
+  - id: atmo_05
+    type: atmotube2
+    start_date: 2026-07-03
+    end_date: null
+    notes: ""
+  - id: atmo_06
+    type: atmotube2
+    start_date: 2026-07-05
+    end_date: null
+    notes: ""
+
+  - id: fit_01
+    type: fitbit6
+    start_date: 2026-06-15
+    end_date: null
+    notes: ""
+  - id: fit_02
+    type: fitbit6
+    start_date: 2026-06-15
+    end_date: null
+    notes: ""
+  - id: fit_03
+    type: fitbit6
+    start_date: 2026-06-15
+    end_date: null
+    notes: ""
+  - id: fit_04
+    type: fitbit6
+    start_date: 2026-06-15
+    end_date: null
+    notes: ""
+  - id: fit_05
+    type: fitbit6
+    start_date: 2026-06-15
+    end_date: null
+    notes: ""
+  - id: fit_06
+    type: fitbit6
+    start_date: 2026-06-15
+    end_date: null
+    notes: ""
+
+# ============================================================================================================
+# PARTICIPANTS + device users (which device+access, when start+end?)
 
 participants:
-  - id: p_01
+  - id: ppt_01
     site: kolkata
-    recruit_start: 2026-06-16
-    recruit_end: null
+    start_date: 2026-06-16
+    end_date: null
     notes: ""
-    uses_devices:
-      - device_id: fitbit_01
-        user_start: 2026-06-16
-        user_end: null
-      - device_id: atmotube_01
-        user_start: 2026-06-16
-        user_end: null
+    devices:
+      - dvc_id: atmo_01
+        acc_id: "0101"
+        start_date: 2026-06-16
+        end_date: 2026-09-18
+      - dvc_id: fit_01
+        acc_id: "0201"
+        start_date: 2026-06-16
+        end_date: null
 
-  - id: p_02
+  - id: ppt_02
     site: kolkata
-    recruit_start: 2026-06-15
-    recruit_end: null
+    start_date: 2026-06-15
+    end_date: null
     notes: ""
-    uses_devices:
-      - device_id: fitbit_02
-        user_start: 2026-06-15
-        user_end: null
-      - device_id: atmotube_02
-        user_start: 2026-06-15
-        user_end: null
+    devices:
+      - dvc_id: atmo_02
+        acc_id: "0102"
+        start_date: 2026-06-15
+        end_date: null
+      - dvc_id: fit_02
+        acc_id: "0202" 
+        start_date: 2026-06-15
+        end_date: null
 
-  - id: p_03
+  - id: ppt_03
     site: kolkata
-    recruit_start: 2026-06-15
-    recruit_end: null
+    start_date: 2026-06-15
+    end_date: null
     notes: ""
-    uses_devices:
-      - device_id: fitbit_03
-        user_start: 2026-06-15
-        user_end: null
-      - device_id: atmotube_03
-        user_start: 2026-06-15
-        user_end: null
+    devices:
+      - dvc_id: atmo_03
+        acc_id: "0103"
+        start_date: 2026-06-15
+        end_date: null
+      - dvc_id: fit_03
+        acc_id: "0203"
+        start_date: 2026-06-15
+        end_date: null
 
-  - id: p_04
+  - id: ppt_04
     site: kolkata
-    recruit_start: 2026-06-15
-    recruit_end: null
+    start_date: 2026-06-15
+    end_date: 2026-08-06
+    notes: "replaced with ppt_08 on 2026-08-06"
+    devices:
+      - dvc_id: atmo_04
+        acc_id: "0104"
+        start_date: 2026-06-15
+        end_date: 2026-08-06
+      - dvc_id: fit_04
+        acc_id: "0204"
+        start_date: 2026-06-15
+        end_date: 2026-08-06
+
+  - id: ppt_05
+    site: kolkata
+    start_date: 2026-06-15
+    end_date: 2026-07-03
+    notes: "replaced with ppt_07 on 2026-07-03"
+    devices:
+      - dvc_id: atmo_05
+        acc_id: "0105"
+        start_date: 2026-06-15
+        end_date: 2026-07-03
+      - dvc_id: fit_05
+        acc_id: "0205"
+        start_date: 2026-06-15
+        end_date: 2026-07-03
+
+  - id: ppt_06
+    site: kolkata
+    start_date: 2026-06-15
+    end_date: null
     notes: ""
-    uses_devices:
-      - device_id: fitbit_04
-        user_start: 2026-06-15
-        user_end: null
-      - device_id: atmotube_04
-        user_start: 2026-06-15
-        user_end: null
+    devices:
+      - dvc_id: atmo_06
+        acc_id: "0106"
+        start_date: 2026-06-15
+        end_date: null
+      - dvc_id: fit_06
+        acc_id: "0206"
+        start_date: 2026-06-15
+        end_date: null
 
-  - id: p_05
+
+  - id: ppt_07
     site: kolkata
-    recruit_start: 2026-07-03
-    recruit_end: null
-    notes: "p5 was replaced with a new participant, hence later recruit_start"
-    uses_devices:
-      - device_id: fitbit_05
-        user_start: 2026-07-03
-        user_end: null
-      - device_id: atmotube_05
-        user_start: 2026-07-03
-        user_end: null
+    start_date: 2026-07-03
+    end_date: null
+    notes: "new acc for old fitbit"
+    devices:
+      - dvc_id: atmo_05
+        acc_id: "0105"
+        start_date: 2026-07-03
+        end_date: null
+      - dvc_id: fit_05
+        acc_id: "0207"
+        start_date: 2026-07-03
+        end_date: null
 
-  - id: p_06
+  - id: ppt_08
     site: kolkata
-    recruit_start: 2026-06-15
-    recruit_end: null
-    notes: ""
-    uses_devices:
-      - device_id: fitbit_06
-        user_start: 2026-06-15
-        user_end: null
-      - device_id: atmotube_06
-        user_start: 2026-06-15
-        user_end: null
-
+    start_date: 2026-08-06
+    end_date: null
+    notes: "new acc for old fitbit"
+    devices:
+      - dvc_id: atmo_04
+        acc_id: "0104"
+        start_date: 2026-08-06
+        end_date: null
+      - dvc_id: fit_04
+        acc_id: "0208"
+        start_date: 2026-08-06
+        end_date: null

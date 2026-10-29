@@ -1,14 +1,15 @@
+# ./src/extract/clients/atmotube2_client.py
 """
 Atmotube Cloud API client 
     -   Per-device, per-date-range raw data pulls
     -   Fetches historical data sequentially
-    -   Bounded thread concurrency ACROSS chunks (not within one — see note below)
+    -   Bounded thread concurrency ACROSS chunks (not within one -- see note below)
 
 HANDLES: 
     -   date-range chunking (conservative safety window)
     -   cursor-based pagination within each chunk (API returns next_cursor until exhausted)
 
-Chunks are fetched sequentially — with typical backfill ranges (a few dozen chunks at most) 
+Chunks are fetched sequentially -- with typical backfill ranges (a few dozen chunks at most) 
 
 KNOWN UNKNOWN:
 - The real rate limit for this API hasn't been confirmed yet. 
@@ -28,21 +29,19 @@ from extract.config.tokens import get_atmotube_api_key
 
 DATA_BASE_URL = "https://api2.atmotube.com/api/v1/measurements"
 
-# NOTE: the openapi-public.json dump had no top-level "servers" block, so this host is inferred from where the spec itself is served — confirmed working via live smoke test on 2026-07-13.
+# NOTE: the openapi-public.json dump had no top-level "servers" block, so this host is inferred from where the spec itself is served -- confirmed working via live smoke test on 2026-07-13.
 
-MAX_DAYS_PER_REQUEST = 7        # NOT confirmed for this endpoint — spec has no stated max range on start_date/end_date.
+MAX_DAYS_PER_REQUEST = 7        # spec has no stated max range on start_date/end_date.
                                 # Kept as a conservative safety window (was confirmed for a DIFFERENT legacy endpoint, not this one).
-MAX_WORKERS_PER_DEVICE = 2      # concurrent CHUNK requests for a single device. Each chunk runs its own independent cursor-pagination sequence (no shared state between chunks),
-                                # so cross-chunk concurrency is safe — pagination WITHIN a chunk is strictly sequential and cannot be parallelized (each page's request needs the next_cursor value from the previous page's response). 
-                                # Bumped from 1 to 2 now that _get_with_retry absorbs 429s — a rate-limit hit degrades to a delay, not a silent failure. Watch for repeated retry warnings before raising further.
+MAX_WORKERS_PER_DEVICE = 2      # concurrent CHUNK requests for a single device. 
+                                # Each chunk runs its own independent cursor-pagination sequence (no shared state between chunks), so cross-chunk concurrency is safe -- pagination WITHIN a chunk is strictly sequential and cannot be parallelized (each page's request needs the next_cursor value from the previous page's response). 
+                                # NOTE: Watch for repeated retry warnings before raising further.
 PAGE_LIMIT = 1440               # API max AND default per spec
 MAX_RETRIES = 3
-RETRY_BACKOFF_SECONDS = 2       # doubles each retry: 2s, 4s, 8s
+RETRY_BACKOFF_SECONDS = 2       # doubles each retry: 2s, 4s, 8s -- if retry warnings become frequent, add a rate limiter (e.g. a shared token bucket).
 
-# Site-wide Atmotube rate limit, confirmed: 60 requests/minute — shared across ALL devices under one site's API key, not per-device. 
-# MAX_WORKERS_PER_DEVICE=2 is safe for a single device in isolation, but extract.py runs multiple Atmotube
-# devices concurrently, and their requests all draw from this same shared budget.
-# _get_with_retry's 429 backoff absorbs occasional overshoot; if retry warnings become frequent during a full multi-device run, that's the signal to add a rate limiter (e.g. a shared token bucket) rather than just widening backoff.
+# Site-wide Atmotube rate limit, confirmed: 60 requests/minute -- shared across ALL devices under one site's API key, not per-device. 
+# MAX_WORKERS_PER_DEVICE=2 is safe for a single device in isolation, but extract.py runs multiple Atmotube devices concurrently, and their requests all draw from this same shared budget.
 ATMOTUBE_RATE_LIMIT_PER_MINUTE = 60
 
 # ============================================================================================================
@@ -71,11 +70,10 @@ def _normalize_mac(mac: str) -> str:
 
 
 def _get_auth(device: dict) -> tuple[str, dict]:
-    """Returns (normalized_mac, headers) — shared setup for any Atmotube call."""
+    """Returns (normalized_mac, headers) -- shared setup for any Atmotube call."""
     mac = _normalize_mac(device["access"])
-    headers = {"X-Api-Key": get_atmotube_api_key(device["site"])}
+    headers = {"X-Api-Key": get_atmotube_api_key()}
     return mac, headers
-
 
 def _get_with_retry(params: dict, headers: dict) -> dict:
     last_exc: Optional[BaseException] = None
@@ -96,11 +94,10 @@ def _get_with_retry(params: dict, headers: dict) -> dict:
 
 
 def _fetch_chunk(mac: str, headers: dict, chunk_start: date, chunk_end: date) -> dict:
-    """
-    Fetch all records for one date window, paginating via cursor/next_cursor
-    (NOT offset — the API is cursor-based) until next_cursor comes back null.
-    This loop is inherently sequential — see MAX_WORKERS_PER_DEVICE note above.
-    """
+    """The API reads end_date as a midnight-UTC instant, so pass the NEXT day to cover all of chunk_end,
+    then drop the record sitting exactly on that midnight (it belongs to the next chunk)."""
+    api_end = chunk_end + timedelta(days=1)
+    cutoff = f"{api_end.isoformat()}T00:00:00Z"
     all_records = []
     cursor = None
     last_payload = None
@@ -108,10 +105,10 @@ def _fetch_chunk(mac: str, headers: dict, chunk_start: date, chunk_end: date) ->
     while True:
         params = {
             "mac": mac,
-            "order": "DESC",  # enum is uppercase: ASC/DESC
+            "order": "DESC",
             "limit": PAGE_LIMIT,
             "start_date": chunk_start.isoformat(),
-            "end_date": chunk_end.isoformat(),
+            "end_date": api_end.isoformat(),
         }
         if cursor:
             params["cursor"] = cursor
@@ -119,13 +116,11 @@ def _fetch_chunk(mac: str, headers: dict, chunk_start: date, chunk_end: date) ->
         payload = _get_with_retry(params, headers)
         last_payload = payload
 
-        # Confirmed real key from MeasurementsPublicSchema — no fallback-key guessing
-        page_records = payload.get("items", [])
-        all_records.extend(page_records)
+        all_records.extend(r for r in payload.get("items", []) if r["date"] < cutoff)
 
         cursor = payload.get("next_cursor")
         if not cursor:
-            break  # no more pages
+            break
 
     return {"records": all_records, "raw_payload": last_payload}
 
@@ -133,10 +128,10 @@ def _fetch_chunk(mac: str, headers: dict, chunk_start: date, chunk_end: date) ->
 def extract_raw_data(device: dict, start_date: str, end_date: str) -> dict:
     """
     Fetch all Atmotube records for one device across [start_date, end_date] (inclusive, "YYYY-MM-DD").
-    Internally splits into chunks (safety window) and fans them out across a small thread pool — chunks are independent (own cursor state), so this is safe to parallelize.
+    Internally splits into chunks (safety window) and fans them out across a small thread pool -- chunks are independent (own cursor state), so this is safe to parallelize.
     Returns: {"mac", "start_date", "end_date", "merged_data", "raw_payload"}
-        - merged_data: flat list of all records across the whole range
-        - raw_payload: the last completed chunk's raw response, kept for debugging only
+        -   merged_data: flat list of all records across the whole range
+        -   raw_payload: the last completed chunk's raw response, kept for debugging only
     """
     device_id = device["id"]
     mac, headers = _get_auth(device)

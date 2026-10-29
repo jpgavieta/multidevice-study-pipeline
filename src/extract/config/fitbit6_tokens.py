@@ -1,9 +1,8 @@
 # src/extract/config/fitbit_tokens.py
 """
 Google Health OAuth
-    -   Each physical device has its own Google account and generated token file (per-device tokens).
-    -   OAuth client (client_id/client_secret) is shared across all devices
-NOTE: Each _tokens.py module NEVER touch each other — ONLY tokens.py
+    -   Each Fitbit ACCOUNT (a Google login, id from `access:` in study_registry.yml, e.g. "0207") has its own generated token file -- a token do NOT belong to a device.
+    -   OAuth client (client_id/client_secret) is shared across all accounts
 """
 
 import json
@@ -17,11 +16,11 @@ import requests
 
 # ============================================================================================================
 
-
 # fitbit_tokens.py
+TYPE_DIR = "fitbit6"                           # device type in study_registry.yml == folder under secrets/
 CONFIG_DIR = Path(__file__).resolve().parent   # .../src/extract/config
-CLIENT_SECRETS_FILE = CONFIG_DIR / "secrets" / "fitbit" / "client_secret.json"
-TOKENS_DIR = CONFIG_DIR / "secrets" / "fitbit" / "tokens"
+API_KEY_PATH = CONFIG_DIR / "secrets" / TYPE_DIR / "client_secret.json" # OAuth client (client_id + client_secret), not a bare key
+TOKENS_DIR = CONFIG_DIR / "secrets" / TYPE_DIR / "tokens"
 
 AUTH_PORT = 8765
 REDIRECT_URI = f"http://localhost:{AUTH_PORT}"
@@ -65,17 +64,18 @@ SCOPES = [
 
 
 def _load_client_secrets():
-    raw = json.loads(CLIENT_SECRETS_FILE.read_text())
+    raw = json.loads(API_KEY_PATH.read_text())
     web = raw["web"]
     return web["client_id"], web["client_secret"]
 
 
-def _token_file(device_id: str) -> Path:
-    return TOKENS_DIR / f"{device_id}.json"
+def _token_file(acc_id: str) -> Path:
+    return TOKENS_DIR / f"{acc_id}.json"
 
 
 class _CallbackHandler(BaseHTTPRequestHandler):
     code = None
+    error = None
 
     def do_GET(self):
         params = parse_qs(urlparse(self.path).query)
@@ -86,47 +86,66 @@ class _CallbackHandler(BaseHTTPRequestHandler):
         if _CallbackHandler.code:
             self.wfile.write(b"<html><body>Authorized. You can close this tab.</body></html>")
         else:
-            error = params.get("error", ["unknown error"])[0]
-            self.wfile.write(f"<html><body>Authorization failed: {error}</body></html>".encode())
+            _CallbackHandler.error = params.get("error", ["unknown error"])[0]
+            self.wfile.write(f"<html><body>Authorization failed: {_CallbackHandler.error}</body></html>".encode())
 
     def log_message(self, format, *args):
         pass
 
 
-def _wait_for_code() -> str:
-    _CallbackHandler.code = None  # reset between devices — same class, reused sequentially
-    server = HTTPServer(("localhost", AUTH_PORT), _CallbackHandler)
-    thread = threading.Thread(target=server.handle_request)
+def _start_callback_server() -> tuple[HTTPServer, threading.Thread]:
+    """
+    Start listening for Google's redirect BEFORE the browser is opened. Binding happens here, so a busy port fails immediately (instead of after you've already signed in).
+    """
+    _CallbackHandler.code = None   # reset between accounts — same class, reused sequentially
+    _CallbackHandler.error = None
+    try:
+        server = HTTPServer(("localhost", AUTH_PORT), _CallbackHandler)
+    except OSError as e:
+        raise RuntimeError(
+            f"Cannot listen on port {AUTH_PORT} ({e}). Is another onboarding still running? "
+            f"The redirect URI registered in Google Cloud is {REDIRECT_URI}."
+        ) from e
+    thread = threading.Thread(target=server.handle_request, daemon=True)
     thread.start()
-    thread.join(timeout=180)
-    if _CallbackHandler.code is None:
-        raise TimeoutError(
-            "No redirect received within 3 minutes — did you approve in "
-            "the browser, or close the tab without approving?"
-        )
-    return _CallbackHandler.code
+    return server, thread
 
 
-def get_access_token(device_id: str, allow_interactive: bool = True) -> str:
-    token_file = _token_file(device_id)
+def _wait_for_code(server: HTTPServer, thread: threading.Thread) -> str:
+    try:
+        thread.join(timeout=180)
+        if _CallbackHandler.code is None:
+            if _CallbackHandler.error:
+                raise RuntimeError(f"Google sign-in was not approved: {_CallbackHandler.error}")
+            raise TimeoutError(
+                "No redirect received within 3 minutes — did you approve in "
+                "the browser, or close the tab without approving?"
+            )
+        return _CallbackHandler.code
+    finally:
+        server.server_close()
+
+
+def get_access_token(acc_id: str, allow_interactive: bool = True) -> str:
+    token_file = _token_file(acc_id)
     if token_file.exists():
         tokens = json.loads(token_file.read_text())
         try:
-            return _refresh_access_token(device_id, tokens)
+            return _refresh_access_token(acc_id, tokens)
         except requests.exceptions.HTTPError:
             if not allow_interactive:
                 raise
-            print(f"⚠️  Saved token for '{device_id}' is no longer valid (refresh rejected). Re-authorizing...")
-            return _run_interactive_auth(device_id)
+            print(f"⚠️  Saved token for account '{acc_id}' is no longer valid (refresh rejected). Re-authorizing...")
+            return _run_interactive_auth(acc_id)
     if not allow_interactive:
         raise RuntimeError(
-            f"No saved token for '{device_id}' — device not onboarded. "
-            f"Run: python -m extract.scripts.onboard_new_fitbit {device_id}"
+            f"No saved token for account '{acc_id}' — not onboarded yet. "
+            f"Run: python -m extract.scripts.verify_fitbit {acc_id}"
         )
-    return _run_interactive_auth(device_id)
+    return _run_interactive_auth(acc_id)
 
 
-def _run_interactive_auth(device_id: str) -> str:
+def _run_interactive_auth(acc_id: str) -> str:
     client_id, client_secret = _load_client_secrets()
 
     params = {
@@ -139,10 +158,19 @@ def _run_interactive_auth(device_id: str) -> str:
     }
     auth_url = f"{AUTH_ENDPOINT}?{urlencode(params)}"
 
-    print(f"Opening browser to sign in to the Google account for device '{device_id}'...")
-    webbrowser.open(auth_url)
+    server, thread = _start_callback_server()
 
-    code = _wait_for_code()
+    print(f"Sign in to the Google account for '{acc_id}'.")
+    try:
+        opened = webbrowser.open(auth_url)
+    except Exception:
+        opened = False
+    if not opened:
+        print("⚠️  Python could not open a browser automatically (common on WSL/SSH).") # always printed: if no window appeared (or the wrong browser opened), paste this into any browser
+    print(f"\nIf no browser window appears, open this URL yourself:\n\n{auth_url}\n")
+    print("Waiting up to 3 minutes for you to approve...")
+
+    code = _wait_for_code(server, thread)
 
     resp = requests.post(TOKEN_ENDPOINT, data={
         "client_id": client_id,
@@ -154,14 +182,14 @@ def _run_interactive_auth(device_id: str) -> str:
     resp.raise_for_status()
     tokens = resp.json()
 
-    token_file = _token_file(device_id)
+    token_file = _token_file(acc_id)
     token_file.parent.mkdir(parents=True, exist_ok=True)
     token_file.write_text(json.dumps(tokens, indent=2))
-    print(f"✅ Authorized and saved token for '{device_id}'.")
+    print(f"✅ Authorized and saved token for account '{acc_id}'.")
     return tokens["access_token"]
 
 
-def _refresh_access_token(device_id: str, tokens: dict) -> str:
+def _refresh_access_token(acc_id: str, tokens: dict) -> str:
     client_id, client_secret = _load_client_secrets()
     resp = requests.post(TOKEN_ENDPOINT, data={
         "client_id": client_id,
@@ -170,9 +198,9 @@ def _refresh_access_token(device_id: str, tokens: dict) -> str:
         "grant_type": "refresh_token",
     })
     if not resp.ok:
-        print(f"DEBUG — Google response body: {resp.text}")   # <-- add this line
+        print(f"DEBUG — Google response body: {resp.text}")
     resp.raise_for_status()
     new_tokens = resp.json()
     new_tokens.setdefault("refresh_token", tokens["refresh_token"])
-    _token_file(device_id).write_text(json.dumps(new_tokens, indent=2))
+    _token_file(acc_id).write_text(json.dumps(new_tokens, indent=2))
     return new_tokens["access_token"]

@@ -26,7 +26,7 @@ import os
 import sys
 from pathlib import Path
 
-from general.study_registry import load_registry
+from general.registry_builder import load_registry
 from general.db_connect import connect_db
 from load.load import load_raw_data, load_processed_data, DESTINATION_TABLES, SLEEP_STAGES_TABLE
 
@@ -76,10 +76,10 @@ def _confirm_safe_db():
 # Fitbit-specific parse + verify
 
 def _parse_fitbit(device_id: str, timezone: str | None, raw_data: dict) -> tuple[dict, dict]:
-    from transform.parse import fitbit_parser
+    from transform.parse import fitbit6_parser
     if not timezone:
         sys.exit(f"❌ '{device_id}' has no 'timezone' set -- required for daily-grain fields.")
-    parsed = fitbit_parser.parse(raw_data, device_id, timezone)
+    parsed = fitbit6_parser.parse(raw_data, device_id, timezone)
     expected_counts = {
         table: (1 if table == "profile" else len(rows))
         for table, rows in parsed.items()

@@ -10,11 +10,11 @@ Safe to re-run:
                 that's literally what uq_device_period (unique constraint) is keyed on
 
 USAGE:
-PYTHONPATH=src python -m load.scripts.seed_study
+PYTHONPATH=src python -m load.scripts.seed_registry
 """
 
 from general.db_connect import connect_db
-from general.study_registry import sync_all
+from general.registry_builder import sync_all
 
 
 def main():
@@ -33,7 +33,7 @@ def main():
             cur.execute("SELECT COUNT(*) FROM study.registry")
             result = cur.fetchone()
             n_reg = result[0] if result is not None else 0
-        print(f"✅ Seeded: {n_dev} devices, {n_part} participants, {n_reg} user assignments")
+        print(f"✅ Seeded: {n_dev} total devices, {n_part} total participants, {n_reg} total user assignments")
     finally:
         conn.close()
 
