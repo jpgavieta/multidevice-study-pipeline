@@ -1,37 +1,43 @@
+name: multidevice-study                                 # fixes the project name; the old stack is "deploy" (the folder name)
+
 services:
   postgres:
-    image: postgis/postgis:15-3.3
-    container_name: app_postgres
+    image: timescale/timescaledb-ha:pg17
     restart: unless-stopped
     environment:
       POSTGRES_USER: ${POSTGRES_USER}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
       POSTGRES_DB: ${POSTGRES_DB}
     ports:
-      - "${DB_PORT}:5432" # Host:Container
+      - "${DB_PORT}:5432"                 # set DB_PORT=5434 in .env while the old DB is running
     volumes:
-      - pg_data:/var/lib/postgresql/data
-      - ./postgres/init:/docker-entrypoint-initdb.d # Where all the preset schemas + tables are!
+      - pg_data:/home/postgres/pgdata/data
+      - ./postgres/init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
     networks:
       - app_net
 
   grafana:
     image: grafana/grafana:latest
-    container_name: app_grafana
     restart: unless-stopped
     user: "0:0"
     ports:
-      - "300:3000"
+      - "3000:3000"
     environment:
       GF_SECURITY_ADMIN_USER: ${GF_ADMIN_USER}
       GF_SECURITY_ADMIN_PASSWORD: ${GF_ADMIN_PASSWORD}
-      # GF_DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}?sslmode=disable
     volumes:
       - ./grafana/grafana-data:/var/lib/grafana
       - ./grafana/provisioning:/etc/grafana/provisioning
       - ./grafana/dashboard-json:/var/lib/grafana/dashboards
     depends_on:
-      - postgres
+      postgres:
+        condition: service_healthy
     networks:
       - app_net
 
@@ -42,5 +48,9 @@ networks:
   app_net:
     driver: bridge
 
-# USAGE: docker compose -f deploy/docker-compose.yml up -d
-# sanity check: docker logs app_postgres   
+#   1. start only the database (the grep is optional)
+# docker compose -f deploy/docker-compose.yml up -d postgres
+# docker compose -f deploy/docker-compose.yml logs postgres | grep -E "ERROR|running /docker|init process complete|ready to accept" 
+#   2. extensions and tables are there
+# docker compose -f deploy/docker-compose.yml exec postgres sh -c 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -c "\dx"'
+# docker compose -f deploy/docker-compose.yml exec postgres sh -c 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -c "\dt registry.*" -c "\dv registry.*"'
