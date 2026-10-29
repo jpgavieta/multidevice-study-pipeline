@@ -216,3 +216,5 @@ PYTHONPATH=src python src/main.py
 
 Runs once daily at `PIPELINE_RUN_HOUR`:`PIPELINE_RUN_MINUTE` UTC (set in `deploy/.env`). 
 For unattended/production use, this is supervised by systemd instead -- see `deploy/systemd/multidevice_schedule.service`.
+
+For more indepth step-by-step guide to setting up a fresh study project -- see `Setting_Up.MD`
