@@ -1,14 +1,13 @@
 # ./src/general/utils_builder.py
 """
 Helpers over study_registry.yml, used by registry_builder.py (sync + validation), extract.py (resolve_usr) and the check_onboard_* scripts (select_targets). 
-This is the YAML layer: it is the one place, besides registry_builder.py and the registry.* tables, that talks about devices (dvc_id), accounts (acc_id) and credentials. 
+
+This is the YAML layer: it is the one place, besides registry_builder.py and the registry.* tables, that talks about devices (dvc_id), accounts/access credentials (acc_id).
 Nothing downstream of extract does.
 
     -   resolve_usr(): a registry.usr row -> the credential an API client needs (extract.py)
-    -   find_assignments / select_targets / classify_ids / describe_target: pick accounts straight from the yml, no database,
-        for the scripts that onboard accounts before the registry has been seeded
-    -   validate_registry / registry_warnings: check that participants <-> devices <-> accounts stay in sync, mirroring the DB
-        constraints (so a bad YAML is caught before it touches the database)
+    -   find_assignments / select_targets / classify_ids / describe_target: pick accounts straight from the yml, no database, for the scripts that onboard accounts before the registry has been seeded
+    -   validate_registry / registry_warnings: check that participants <-> devices <-> accounts stay in sync, mirroring the DB constraints (so a bad YAML is caught before it touches the database)
 
 Registry shape this module expects (./config/study_registry.yml):
 
