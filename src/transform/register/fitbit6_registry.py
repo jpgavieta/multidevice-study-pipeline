@@ -10,7 +10,7 @@ Destination tables (deploy/postgres/init/04_readings.sql):
     readings.fitbit6_exercise   one row per exercise session
     readings.fitbit6_ecg        one row per ECG session 
 
-READINGS_REGISTRY "role" decides how a value is placed on the timeline:
+READINGS_DATA_TYPES "role" decides how a value is placed on the timeline:
     sample      measured at one instant. Kept at its exact timestamp. Duplicates at the same instant are averaged.
     amount      accumulated over [start, end) (steps, distance, kcal). SPLIT EVENLY across the rows inside the interval, so SUM over the interval returns the original total. Never AVG or interpolate these.
     state        a category that holds over [start, end) (activity level, HR zone). Copied onto every row in the interval.
@@ -25,7 +25,7 @@ READINGS_REGISTRY "role" decides how a value is placed on the timeline:
 "kind" = how the payload is read:  scalar | categorical | tag_list | flag | json
 "verified": False = field names are guesses; the parser prints a warning when used.
 
-DAILY_REGISTRY "kind":  fields {source path: (column, dtype)} | json_map | json
+DAILY_DATA_TYPES "kind":  fields {source path: (column, dtype)} | json_map | json
 """
 
 # Seconds between filled rows inside an interval/session. One constant; change it here only.
@@ -34,7 +34,7 @@ STEP_SECONDS = 10
 # ====================================================================================================
 # Continuous table: readings.fitbit6
 
-READINGS_REGISTRY = {
+READINGS_DATA_TYPES = {
 
 # -- samples (continuous). Only these three may be interpolated.
     "heart-rate": {
@@ -112,17 +112,17 @@ READINGS_REGISTRY = {
     "blood-glucose": {
         "role": "sample", "grain": "sample", "kind": "json", "column": "bld_glucose_data", "verified": False,
     },
-    # (no "vo2-max" here: the data type is "daily-vo2-max", a DAILY type -> DAILY_REGISTRY / readings.fitbit6_days.vo2_max_data)
+    # (no "vo2-max" here: the data type is "daily-vo2-max", a DAILY type -> DAILY_DATA_TYPES / readings.fitbit6_days.vo2_max_data)
 }
 
 # The ONLY readings.fitbit6 columns that may be passed to interpolate()/locf(). Everything else is an
 # interval/session-derived value (amount/state/flag) or a sparse sample (weight, height, body fat).
-INTERPOLABLE_COLUMNS = {r["column"] for r in READINGS_REGISTRY.values() if r.get("interpolable")}
+INTERPOLABLE_COLUMNS = {r["column"] for r in READINGS_DATA_TYPES.values() if r.get("interpolable")}
 
 # ====================================================================================================
 # Daily table: readings.fitbit6_days
 
-DAILY_REGISTRY = {
+DAILY_DATA_TYPES = {
     "daily-resting-heart-rate": {
         "kind": "fields",
         "fields": {
@@ -205,3 +205,8 @@ EXERCISE_METHOD_PATH = "metadata.method"
 UNMAPPED_DATA_TYPES = {
     "floors",  # daily rollup; has no column in readings.fitbit6_days yet
 }
+
+# ====================================================================================================
+ALL_DATA_TYPES = (
+    set(READINGS_DATA_TYPES) | set(DAILY_DATA_TYPES) | set(BESPOKE_DATA_TYPES)
+)

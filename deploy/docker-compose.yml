@@ -2,7 +2,7 @@ name: multidevice-study                                 # fixes the project name
 
 services:
   postgres:
-    image: timescale/timescaledb-ha:pg17
+    image: timescale/timescaledb-ha:pg17.11-ts2.31.0
     restart: unless-stopped
     environment:
       POSTGRES_USER: ${POSTGRES_USER}

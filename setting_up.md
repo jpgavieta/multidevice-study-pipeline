@@ -20,16 +20,18 @@ docker compose up -d
 ```
 
 This starts two services (`deploy/docker-compose.yml`):
-- **`app_postgres`** -- Postgres 15 + PostGIS, with `deploy/postgres/init/` mounted as Docker's `docker-entrypoint-initdb.d/`. On a **first boot only** (empty `pg_data` volume), Postgres runs every `.sql` file in that folder, in filename order:
+- **`app_postgres`** -- Postgres 17 + TimescaleDB + PostGIS (`timescale/timescaledb-ha:pg17`), with `deploy/postgres/init/` mounted as Docker's `docker-entrypoint-initdb.d/`. On a **first boot only** (empty `pg_data` volume), Postgres runs every `.sql` file in that folder, in filename order:
 
   | File | Creates |
   |---|---|
-  | `00_extensions.sql` | `postgis`, `btree_gist` extensions |
-  | `01_schemas.sql` | `raw`, `study`, `atmotube`, `fitbit` schemas |
-  | `02_study.sql` | `study.devices`, `study.participants`, `study.registry` (+ views) |
-  | `03_raw.sql` | `raw.ingests`, `raw.pipeline` |
-  | `04_atmotube.sql` | `atmotube.readings` |
-  | `05_fitbit.sql` | `fitbit.readings` / `sleep_sessions` / `exercise_sessions` / `profile` |
+  | `00_extensions.sql` | `timescaledb`, `postgis`, `btree_gist` extensions |
+  | `01_schemas.sql` | `registry`, `raw`, `readings`, `accounts` schemas |
+  | `02_registry.sql` | `registry.type` / `site` / `dvc` / `ppt` / `acc` / `usr` (+ views) |
+  | `03_raw.sql` | `raw.ingests`, `raw.pipeline`, `raw.pull_coverage` |
+  | `04_readings.sql` | `readings.atmotube2` / `fitbit6` (hypertables), `fitbit6_ecg` / `_exercise` / `_sleep` / `_days` (+ dashboard views) |
+  | `05_accounts.sql` | `accounts.usr` |
+
+  Order matters: each file only references objects created by earlier ones (schemas → `registry.usr` → `raw.*` → `readings.*` / `accounts.*`, which FK to both).
 
 - **`app_grafana`** -- dashboard UI on port `300`, depends on `postgres`.
 

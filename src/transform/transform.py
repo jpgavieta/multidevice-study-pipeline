@@ -4,11 +4,10 @@ import pandas as pd
 
 from .parse import atmotube_parser
 from .parse import fitbit6_parser
-# from .parse import ponyopi_parser
 
 # ============================================================================================================
 # Device Registry
-# NOTE: keys are lowercase to match devices.yml / extract.py's PARSER_REGISTRY
+# NOTE: keys are lowercase to match registry.sql / extract.py's PARSER_REGISTRY
 
 PARSER_REGISTRY = {
     "atmotube2": atmotube_parser, # TODO: Update atmotube parser to fit the readings.sql
@@ -30,7 +29,7 @@ def transform_device_data(raw_data: dict[str, dict[int, dict]]) -> dict[str, dic
 
         for usr_id, entry in per_usr.items():
             try:
-                parsed = parser_module.parse(entry["payload"], usr_id, entry.get("timezone"))
+                parsed = parser_module.parse(entry["payload"], usr_id)
                 results[type][usr_id] = {"data": parsed}
                 print(f"✅ Transformed {type}/usr {usr_id}")
             except Exception as e:

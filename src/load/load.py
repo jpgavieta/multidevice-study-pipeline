@@ -1,164 +1,149 @@
 # ./src/load/load.py
 """
-Pushes raw API payloads and processed data into the database.
-    -   raw.ingests stores exact API responses as JSONB (JSONs as binary not text)
-    -   processed tables (fitbit.*, atmotube.*) are populated by load_processed_data(),
-        using the row-dicts produced by transform.transform_device_data().
+Pushes raw API payloads and processed data into the database, keyed on registry.usr (usr_id).
+    -   raw.ingests stores exact API responses as JSONB (one row per usr_id per pull).
+    -   processed tables (readings.*, accounts.usr) are populated by load_processed_data(), using the row-dicts produced by transform.transform_usr_data().
 
-Everything upserts on each table's declared UNIQUE key, so re-pulling overlapping date ranges (e.g. backfill windows, or a scheduler retry) is safe.
-    Rows get updated in place rather than duplicated.
-    EXCEPTION: raw.ingests is an append-only log of pipeline runs.
-        Every call to load_raw_data() adds new rows regardless of payload content.
+Input shape everywhere:  { type: { usr_id: {...} } }   (type = registry.type id, e.g. "fitbit6", "atmotube2")
 
-FAILURE ISOLATION: load_processed_data() commits per device_id, not once for
-the whole batch.
-E.g. If device 9 of 13 has a bad record, devices 1-8's (already correctly parsed) data stays committed.
-    Only device 9's transaction rolls back and gets logged as failed in study.pipeline_runs.
-    TRADE-OFF: 13 commits instead of 1 for not losing 12 devices' worth of correctly-loaded data over one bad device.
+UPSERTS
+    Every processed table upserts on its UNIQUE key, so re-pulling overlapping date ranges (backfill windows, a scheduler retry) is safe.
+    Several data types fill the same wide row (readings.fitbit6 / atmotube2 / fitbit6_days), and a pull may only cover some of them,
+    so every data column is merged as  col = COALESCE(EXCLUDED.col, t.col):  a re-pull never NULLs out a column it did not fetch.
+    (Consequence: a value can be replaced but never cleared back to NULL by a re-pull. ingest_id always points at the latest pull.)
+    Rows that share a conflict key INSIDE one batch are merged column by column (non-NULL wins, later rows win ties),
+    because Postgres refuses to update one row twice in a statement and a plain "last row wins" would drop columns.
+    EXCEPTION: raw.ingests is an append-only log; every load_raw_data() call adds new rows.
 
-load_raw_data() applies the SAME failure-isolation philosophy, but in two zones:
-    1.  Row-building (per device): if one device's payload can't be serialized/built into
-        a row (e.g. json.dumps() fails on a malformed payload), that device is skipped and
-        logged — it does NOT block the other devices' rows from being batched and inserted.
-    2.  The batch INSERT itself: still ONE execute_values() call, ONE commit, for whatever
-        rows built cleanly. If THIS fails (e.g. DB connection drop mid-write), that's a
-        systemic failure, not a one-device problem — it still rolls back and re-raises,
-        so main.py's retry/notify layer is the one responsible for handling it.
+LOAD ORDER (per usr_id)
+    1.  session tables  readings.fitbit6_sleep / _exercise / _ecg   (regular tables with identity ids)
+    2.  readings.fitbit6 -- the parser tags each timeline row inside a session with that session's natural key, a (started_at, ended_at) tuple.
+        Those tuples are replaced here by the ids read back from step 1.
+    3.  everything else (readings.fitbit6_days, readings.atmotube2, accounts.usr)
 
-NOTE: fitbit.readings -> this table now absorbs what used to be a separate fitbit.states table. 
-    Categorical/state-type records (e.g. "activity-level", "sedentary-period") route through the SAME ("fitbit", "readings") destination as scalar metrics. See fitbit_registry.py for which data_types are which.
-    State rows populate value_text (mirroring the state already stored in tag — tag is kept, not cleared, since it's part of the UNIQUE constraint and clearing it would break upsert-safety on re-pulls) 
-    and leave value_numeric NULL; scalar rows populate value_numeric and leave value_text NULL. metric defaults to '' for state rows (not NULL) so the UNIQUE constraint stays reliable. see 04_fitbit.sql.
+WINDOW CHECK
+    Everything is UTC. registry.usr windows [started_at, ended_at) are read as UTC dates, and a timestamptz row is
+    compared by its UTC date (DATE columns such as fitbit6_days.started_at are used as is). Pulls are padded by a day,
+    so a payload can hold rows outside the usr's window. Those rows are NOT loaded (they belong to a different usr, or to nobody).
+    They are counted and reported in raw.pipeline.error_message, and the full payload is still in raw.ingests.
+    Rows are never dropped silently. On a handover day the edge can be off by a few hours (no per-usr timezone).
+
+FAILURE ISOLATION
+    load_processed_data() commits per usr_id: one usr's failure rolls back only that usr, is logged in raw.pipeline as 'failed', and the rest of the batch loads.
+    load_raw_data() isolates row-building per usr_id the same way; the batch INSERT itself is one execute_values() call / one commit,
+    and a failure there is systemic, so it rolls back and re-raises for main.py's retry/notify layer.
+
+RETURN VALUE (for backfill / CSV loaders)
+    load_processed_data() returns { (type, usr_id): "success" | "partial" | "failed" | "skipped" }.
+    Coverage (raw.pull_coverage) must only be written for "success" / "partial" usr_ids, and only for what the
+    pull actually scanned (decide that from the RAW payload, not from this result: a Fitbit data type that is None there FAILED).
 """
 
-import os
 import json
-from typing import Optional
+from datetime import date, datetime, timezone
 from pathlib import Path
-from datetime import datetime, timezone
+from typing import Optional
 
-import psycopg2
-from psycopg2.extras import execute_values
 from dotenv import load_dotenv
+from psycopg2.extras import Json, execute_values
 
-from general.pipeline_logger import start_run, end_run
 from general.db_connect import connect_db
+from general.pipeline_logger import end_run, start_run
 
 # ============================================================================================================
-
 
 ENV_PATH = Path(__file__).resolve().parents[2] / "deploy" / ".env"
 load_dotenv(dotenv_path=ENV_PATH)
 
-# Maps (device_type, transform.py table_name) -> (sql_table, conflict_cols) for upserting.
-# NOTE: sleep_stages is handled separately (needs session_id FK resolution first).
+# transform.py table_name -> (sql_table, conflict_cols, time_col). time_col drives the window check
+# (TIMESTAMPTZ -> UTC date; DATE used as is).
 DESTINATION_TABLES = {
-    ("fitbit", "readings"):          ("fitbit.readings",          ("device_id", "data_type", "recorded_at", "metric", "tag")),
-    ("fitbit", "sleep_sessions"):    ("fitbit.sleep_sessions",    ("device_id", "started_at")),
-    ("fitbit", "exercise_sessions"): ("fitbit.exercise_sessions", ("device_id", "started_at")),
-    ("fitbit", "profile"):           ("fitbit.profile",           ("device_id", "recorded_at")),
-    ("atmotube", "readings"):        ("atmotube.readings",        ("device_id", "recorded_at")),
+    "fitbit6":          ("readings.fitbit6",          ("usr_id", "recorded_at"),               "recorded_at"),
+    "fitbit6_days":     ("readings.fitbit6_days",     ("usr_id", "started_at"),                "started_at"),
+    "fitbit6_sleep":    ("readings.fitbit6_sleep",    ("usr_id", "started_at", "ended_at"),    "started_at"),
+    "fitbit6_exercise": ("readings.fitbit6_exercise", ("usr_id", "started_at", "ended_at"),    "started_at"),
+    "fitbit6_ecg":      ("readings.fitbit6_ecg",      ("usr_id", "started_at", "ended_at"),    "started_at"),
+    "atmotube2":        ("readings.atmotube2",        ("usr_id", "recorded_at"),               "recorded_at"),
 }
-SLEEP_STAGES_TABLE = "fitbit.sleep_stages"
-SLEEP_STAGES_CONFLICT_COLS = ("session_id", "started_at")
+ACCOUNTS_TABLE = "accounts.usr"   # parser key "profile": one {"usr_id", "attrs"} dict per pull. Check against 05_accounts.sql.
 
-# Tables where a row's dict must NOT get ingest_id tagged onto it, because the table has no ingest_id column (
-# (it's a slowly-changing snapshot, not a point-in-time event tied to one specific pull).
-NO_INGEST_ID_TABLES = {
-    ("fitbit", "profile"),
+# Session tables, in load order, and the readings.fitbit6 column that references each (parser key -> FK column).
+SESSION_TABLES = (
+    ("fitbit6_sleep",    "sleep_id"),
+    ("fitbit6_exercise", "exercise_id"),
+    ("fitbit6_ecg",      "ecg_id"),
+)
+TIMELINE_TABLE = "fitbit6"
+
+# Columns holding a WKT string that must be wrapped in ST_GeomFromEWKT(%s) instead of inserted as a plain value.
+WKT_COLUMNS = {"readings.atmotube2": "location"}
+
+# JSONB columns (see 04_readings.sql). A dict/list value here is wrapped in Json() so psycopg2 can adapt it.
+# TEXT[] columns (waveform_data, interpolated_cols) are deliberately NOT listed: lists stay lists there.
+JSON_COLUMNS = {
+    "exercise_events", "metadata", "sleep_stages_data", "sleep_sum_data",
+    "hr_zones_kcal_data", "vo2_max_data", "body_temp_data", "bld_glucose_data",
 }
 
-# Tables where one column holds a WKT string that needs wrapping in ST_GeomFromEWKT(%s) rather than being inserted as a plain value.
-WKT_COLUMNS = {
-    "atmotube.readings": "location",
-}
+PAGE_SIZE = 1000
 
 # ============================================================================================================
 
+
 def _build_location(latitude, longitude) -> str | None:
-    """
-    Builds an EWKT point string for atmotube.readings.location, 
-    e.g. 'SRID=4326;POINT(88.3639 22.5726)' — note WKT/EWKT order is (lon, lat), not (lat, lon);
-    that axis-order mixup is the classic geometry bug. This function is to avoid making by hand at every call site.
-    Returns None if either coordinate is missing (e.g. GPS fix not acquired for that reading)
-    — PostGIS geometry columns are nullable for this reason.
-    """
+    """EWKT point, e.g. 'SRID=4326;POINT(88.36 22.57)'. NOTE: WKT order is (lon, lat). None if either coordinate is missing (no GPS fix)."""
     if latitude is None or longitude is None:
         return None
     return f"SRID=4326;POINT({longitude} {latitude})"
 
 
-def load_raw_data(all_data: dict[str, dict[str, dict]]) -> tuple[dict[tuple[str, str], int], datetime, list[str]]:
+def load_raw_data(all_data: dict[str, dict[int, dict]]) -> tuple[dict[tuple[str, int], int], datetime, list[str]]:
     """
-    Pushes raw API payloads into raw.ingests, one row per device per pull.
-    all_data shape: { device_type: { device_id: {"payload": ..., "ingest_method": ...} } }
-    Matches extract.py's extract_all_devices() output. For CSV backfills (extract/scripts/backfill_atmotube.py).
-    Same shape applies with ingest_method="csv_manual".
-
-    FAILURE ISOLATION (row-building only): each device's row is built inside its own try/except. 
-    A device whose payload can't be serialized (e.g. json.dumps() fails on a malformed payload) is skipped and logged 
-    — it does NOT block the other devices' rows from being batched and inserted. 
-    This mirrors the per-device isolation already used in load_processed_data(), applied one step earlier in the pipeline.
-
-    The actual DB write is still ONE execute_values() call / ONE commit for whatever rows built cleanly 
-    — that batch-insert efficiency is intentional and unchanged.
-    If THAT call itself fails (e.g. connection drop mid-write), it's treated as a systemic failure: rollback + re-raise, same as before. 
-    That's deliberately NOT aught here 
-    — main.py's retry/notify layer owns that case.
+    Pushes raw API payloads into raw.ingests, one row per usr_id per pull.
+    all_data: { type: { usr_id: {"payload", "ingest_method", ...} } }  -- extract.extract_all_usrs() output
+    (CSV backfills use the same shape with ingest_method="csv_manual").
 
     Returns
     -------
-    ingest_ids : dict
-        { (device_type, device_id): ingest_id } for every device whose row was built
-        AND inserted successfully. A skipped/failed device simply has no key here —
-        load_processed_data() already treats a missing ingest_id as "skip this device"
-        (see its `if ingest_id is None: ... continue` branch), so no downstream change
-        is needed to support this.
-    fetched_at : datetime
-        Shared timestamp for this pull batch.
-    skipped : list[str]
-        Human-readable reasons for any device that failed to build a row (e.g.
-        "fitbit/ABC123: payload not JSON-serializable: ..."). Empty if nothing was
-        skipped. main.py can log/notify on this list without it ever having been
-        raised as an exception.
+    ingest_ids  :   { (type, usr_id): ingest_id } for every usr_id whose row was built AND inserted.
+                    A skipped usr simply has no key; load_processed_data() skips usr_ids without one.
+    pulled_at   :   shared timestamp for this pull batch.
+    skipped     :   human-readable reasons for any usr_id whose payload could not be built into a row (e.g. not JSON-serializable).
     """
-    fetched_at = datetime.now(timezone.utc)
+    pulled_at = datetime.now(timezone.utc)
     keys, rows = [], []
     skipped: list[str] = []
 
-    for device_type, devices in all_data.items():
-        for device_id, entry in devices.items():
-            # --- Zone 1: per-device row-building, isolated ---
+    for type_, per_usr in all_data.items():
+        for usr_id, entry in per_usr.items():
             try:
                 payload_json = json.dumps(entry["payload"])
-                row = (device_type, device_id, entry["ingest_method"], fetched_at, payload_json)
+                row = (usr_id, type_, entry["ingest_method"], pulled_at, payload_json)
             except Exception as e:
-                msg = f"{device_type}/{device_id}: failed to build raw row ({e})"
+                msg = f"{type_}/usr {usr_id}: failed to build raw row ({e})"
                 print(f"   ⚠️ {msg} — skipped")
                 skipped.append(msg)
                 continue
-
-            keys.append((device_type, device_id))
+            keys.append((type_, usr_id))
             rows.append(row)
 
     if not rows:
         print("⚠️ No raw data to load.")
-        return {}, fetched_at, skipped
+        return {}, pulled_at, skipped
 
-    # --- Zone 2: the batch write itself, NOT isolated — systemic failure, re-raise ---
     conn = connect_db()
     try:
         with conn.cursor() as cur:
             returned = execute_values(
                 cur,
-                "INSERT INTO raw.ingests (device_type, device_id, ingest_method, fetched_at, payload) VALUES %s RETURNING id",
+                "INSERT INTO raw.ingests (usr_id, type, ingest_method, pulled_at, payload) VALUES %s RETURNING id",
                 rows,
                 template="(%s, %s, %s, %s, %s::jsonb)",
                 fetch=True,
             )
         conn.commit()
         print(f"✅ Loaded {len(rows)} raw record(s) into raw.ingests"
-            + (f" ({len(skipped)} device(s) skipped at row-build)" if skipped else ""))
+            + (f" ({len(skipped)} usr(s) skipped at row-build)" if skipped else ""))
     except Exception as e:
         conn.rollback()
         print(f"❌ Raw batch insert failed: {e}")
@@ -166,221 +151,285 @@ def load_raw_data(all_data: dict[str, dict[str, dict]]) -> tuple[dict[tuple[str,
     finally:
         conn.close()
 
-    # Postgres processes/returns multi-row VALUES+RETURNING in input order, so this
-    # zip is safe — each returned id lines up with the key at the same position.
-    ingest_ids = {key: returned_row[0] for key, returned_row in zip(keys, returned)}
-    return ingest_ids, fetched_at, skipped
+    # Postgres returns multi-row VALUES + RETURNING in input order, so zipping with keys is safe.
+    ingest_ids = {key: r[0] for key, r in zip(keys, returned)}
+    return ingest_ids, pulled_at, skipped
 
 
-def _upsert_rows(cur, table: str, rows: list[dict], conflict_cols: tuple, returning: Optional[tuple] = None) -> list[dict]:   
+# ============================================================================================================
+# upsert + window helpers
+
+
+def _merge_duplicates(rows: list[dict], conflict_cols: tuple) -> list[dict]:
+    """Rows sharing a conflict key are merged into one: non-None values win, later rows win ties."""
+    merged: dict[tuple, dict] = {}
+    for r in rows:
+        key = tuple(r.get(c) for c in conflict_cols)
+        target = merged.setdefault(key, {})
+        target.update({k: v for k, v in r.items() if v is not None})
+        for c in conflict_cols:          # keep the key columns even if (unexpectedly) None
+            target.setdefault(c, r.get(c))
+    return list(merged.values())
+
+
+def _adapt(column: str, value):
+    """Wraps dict/list values of JSONB columns in Json(); everything else passes through unchanged."""
+    if column in JSON_COLUMNS and isinstance(value, (dict, list)):
+        return Json(value)
+    return value
+
+
+def _upsert_rows(cur, table: str, rows: list[dict], conflict_cols: tuple, returning: Optional[tuple] = None) -> list[dict]:
     """
-    Generic upsert: INSERT ... ON CONFLICT (conflict_cols) DO UPDATE, returning the requested columns per row
-    (used for FK resolution, e.g. sleep_sessions -> id).
-    If `returning` is not provided, defaults to conflict_cols (guaranteed to exist on every table).
-    Every row must share the same set of keys (parser output should guarantee this).
+    INSERT ... ON CONFLICT (conflict_cols) DO UPDATE, returning the requested columns per row (default: conflict_cols).
+
+    -   Rows may carry different key sets (the timeline is sparse): columns are the union, missing values are NULL.
+    -   Every data column merges as COALESCE(EXCLUDED.col, t.col); ingest_id is simply overwritten by the latest pull.
+    -   Duplicate conflict keys inside one batch are merged first (see _merge_duplicates).
     """
-    if returning is None:
-        returning = conflict_cols
     if not rows:
         return []
+    returning = returning or conflict_cols
 
-    columns = list(rows[0].keys())
+    columns: list[str] = []
     for row in rows:
-        if row.keys() != rows[0].keys():
-            raise ValueError(f"Inconsistent row columns for {table}: {sorted(row.keys())} vs {sorted(rows[0].keys())}")
+        for c in row:
+            if c not in columns:
+                columns.append(c)
+    missing = [c for c in conflict_cols if c not in columns]
+    if missing:
+        raise ValueError(f"{table}: rows lack conflict column(s) {missing}")
+
+    rows = _merge_duplicates(rows, conflict_cols)
 
     update_cols = [c for c in columns if c not in conflict_cols]
-    if not update_cols:
-        # nothing to update on conflict — just make it a no-op update on the conflict key itself
-        set_clause = f"{conflict_cols[0]} = EXCLUDED.{conflict_cols[0]}"
+    if update_cols:
+        set_clause = ", ".join(
+            f"{c} = EXCLUDED.{c}" if c == "ingest_id" else f"{c} = COALESCE(EXCLUDED.{c}, t.{c})"
+            for c in update_cols
+        )
     else:
-        set_clause = ", ".join(f"{c} = EXCLUDED.{c}" for c in update_cols)
-    returning_clause = ", ".join(returning)
+        set_clause = f"{conflict_cols[0]} = EXCLUDED.{conflict_cols[0]}"  # no-op update so RETURNING still yields the row
 
     wkt_col = WKT_COLUMNS.get(table)
-    placeholders = [f"ST_GeomFromEWKT(%s)" if c == wkt_col else "%s" for c in columns]
-
+    template = "(" + ", ".join("ST_GeomFromEWKT(%s)" if c == wkt_col else "%s" for c in columns) + ")"
     sql = (
-        f"INSERT INTO {table} ({', '.join(columns)}) VALUES %s "
+        f"INSERT INTO {table} AS t ({', '.join(columns)}) VALUES %s "
         f"ON CONFLICT ({', '.join(conflict_cols)}) DO UPDATE SET {set_clause} "
-        f"RETURNING {returning_clause}"
+        f"RETURNING {', '.join(returning)}"
     )
-    template = "(" + ", ".join(placeholders) + ")"
-    values = [tuple(row.get(c) for c in columns) for row in rows]
+    values = [tuple(_adapt(c, r.get(c)) for c in columns) for r in rows]
+    result = execute_values(cur, sql, values, template=template, page_size=PAGE_SIZE, fetch=True)
+    return [dict(zip(returning, r)) for r in result]
 
-    result_rows = execute_values(cur, sql, values, template=template, fetch=True)
-    return [dict(zip(returning, r)) for r in result_rows]
+
+def _get_window(cur, usr_id: int) -> tuple[date, date | None]:
+    """registry.usr window [started_at, ended_at); ended_at NULL = open. Read as UTC dates."""
+    cur.execute("SELECT started_at, ended_at FROM registry.usr WHERE id = %s", (usr_id,))
+    row = cur.fetchone()
+    if row is None:
+        raise LookupError(f"usr_id {usr_id} not in registry.usr")
+    return row[0], row[1]
+
+
+def _utc_date(value) -> date | None:
+    """tz-aware datetime -> its UTC date; naive datetime -> its date (UTC by convention); date -> as is."""
+    if value is None:
+        return None
+    if isinstance(value, datetime):  # check first: datetime is a subclass of date
+        if value.tzinfo is None:
+            return value.date()
+        return value.astimezone(timezone.utc).date()
+    return value  # already a date
+
+
+def _filter_window(rows: list[dict], time_col: str, window: tuple[date, date | None]) -> tuple[list[dict], int]:
+    """Keeps rows whose UTC date lies in [window start, window end). Returns (kept, n_outside)."""
+    w_start, w_end = window
+    kept = []
+    for r in rows:
+        d = _utc_date(r.get(time_col))
+        if d is None or d < w_start or (w_end is not None and d >= w_end):
+            continue
+        kept.append(r)
+    return kept, len(rows) - len(kept)
 
 
 def _prepare_atmotube_rows(rows: list[dict]) -> list[dict]:
-    """
-    Converts each atmotube row's plain latitude/longitude fields into the 'location' EWKT string atmotube.readings actually stores.
-    Drops the two lat/lon keys (real columns on the table; see atmotube_parser.py, it emits them only so this function has something to build the geometry from).
-    """
+    """Turns each row's latitude/longitude into the 'location' EWKT string readings.atmotube2 stores (the two source keys are dropped)."""
     prepared = []
     for row in rows:
-        row = dict(row)  # don't mutate the parser's own output
-        lat = row.pop("latitude", None)
-        lon = row.pop("longitude", None)
-        row["location"] = _build_location(lat, lon)
+        row = dict(row)  # don't mutate the parser's output
+        row["location"] = _build_location(row.pop("latitude", None), row.pop("longitude", None))
         prepared.append(row)
     return prepared
 
-def _prepare_fitbit_readings_rows(rows: list[dict]) -> list[dict]:
+
+def _load_profile(cur, usr_id: int, profile: dict, ingest_id: int, pulled_at: datetime) -> bool:
+    """accounts.usr is a snapshot log: only append a row if attrs differ from the latest snapshot. Returns True if a row was added."""
+    cur.execute(f"SELECT attrs FROM {ACCOUNTS_TABLE} WHERE usr_id = %s ORDER BY recorded_at DESC LIMIT 1", (usr_id,))
+    last = cur.fetchone()
+    if last is not None and last[0] == profile["attrs"]:
+        return False
+    cur.execute(
+        f"INSERT INTO {ACCOUNTS_TABLE} (usr_id, recorded_at, attrs, ingest_id) VALUES (%s, %s, %s, %s)",
+        (usr_id, pulled_at, Json(profile["attrs"]), ingest_id),
+    )
+    return True
+
+
+# ============================================================================================================
+
+
+def _load_one_usr(cur, type_: str, usr_id: int, data: dict, ingest_id: int, pulled_at: datetime) -> tuple[list[str], list[str]]:
     """
-    Populates value_text for state/categorical rows (fitbit_parser.py's 'categorical' kind puts the state label in 'tag', not 'value_text' — see fitbit_registry.py).
-    Every row destined for fitbit.readings must end up with the SAME set of keys (see _upsert_rows), so value_text is set to None for scalar rows too, not omitted.
-
-    NOTE: tag is intentionally NOT cleared for state rows, even though it now duplicates value_text. fitbit.readings' UNIQUE constraint includes tag 
-    — clearing it to NULL would break ON CONFLICT matching on re-pulls (NULL never conflicts with NULL in Postgres), causing duplicate rows on every re-run instead of a clean upsert.
+    Loads every destination table for one usr_id's parsed output. Raises on any failure; the caller owns commit/rollback.
+    Returns (issues, notes):
+        issues ->   something could not be loaded (unknown table): run is logged 'partial'
+        notes  ->   informational, expected in normal operation (out-of-window rows not loaded, timeline rows whose session fell outside the window, profile unchanged): logged on the run, status stays 'success'
     """
-    prepared = []
-    for row in rows:
-        row = dict(row)  # don't mutate the parser's own output
-        if row.get("value_numeric") is None and row.get("tag") is not None:
-            row["value_text"] = row["tag"]
-        else:
-            row["value_text"] = None
-        prepared.append(row)
-    return prepared
+    issues: list[str] = []
+    notes: list[str] = []
+    window = _get_window(cur, usr_id)
 
-def _load_one_device(cur, device_type: str, device_id: str, data: dict, ingest_id: int, fetched_at: datetime) -> list[str]:
-    """Loads every destination table for one device's parsed output. 
-    Raises on any failure — caller is responsible for commit/rollback, since that's where per-device isolation lives.
-    Returns a list of skip-reason messages (empty if nothing was skipped)
-        Used by the caller to decide between status='success' and status='partial'
-        Also used to populate raw.pipeline.error_message with what was actually skipped.
-    """
+    data = dict(data)
+    profile = data.pop("profile", None)
 
-    skip_reasons: list[str] = []
+    # Window check, per table
+    outside: dict[str, int] = {}
+    for table_name, rows in list(data.items()):
+        if table_name not in DESTINATION_TABLES:
+            continue
+        time_col = DESTINATION_TABLES[table_name][2]
+        kept, n_out = _filter_window(rows, time_col, window)
+        data[table_name] = kept
+        if n_out:
+            outside[table_name] = n_out
+    if outside:
+        notes.append("rows outside usr window not loaded: " + ", ".join(f"{t}={n}" for t, n in outside.items()))
 
-    # sleep_sessions must land first — sleep_stages needs the generated
-    # session_id, resolved below via each stage's session_started_at.
-    session_id_by_start = {}
-    if "sleep_sessions" in data and data["sleep_sessions"]:
-        sql_table, conflict_cols = DESTINATION_TABLES[("fitbit", "sleep_sessions")]
-        rows = [{**r, "ingest_id": ingest_id} for r in data["sleep_sessions"]]
-        returned = _upsert_rows(cur, sql_table, rows, conflict_cols, returning=("id", "started_at"))
-        session_id_by_start = {r["started_at"]: r["id"] for r in returned}
-        print(f"   ✅ Loaded {len(rows)} row(s) into {sql_table} for {device_type}/{device_id}")
+    # 1. session tables first -> read back ids keyed by natural key
+    session_ids: dict[str, dict[tuple, int]] = {}
+    for table_name, _fk_col in SESSION_TABLES:
+        rows = data.pop(table_name, [])
+        if not rows:
+            continue
+        sql_table, conflict_cols, _ = DESTINATION_TABLES[table_name]
+        tagged = [{**r, "ingest_id": ingest_id} for r in rows]
+        returned = _upsert_rows(cur, sql_table, tagged, conflict_cols, returning=("id", "started_at", "ended_at"))
+        session_ids[table_name] = {(r["started_at"], r["ended_at"]): r["id"] for r in returned}
+        print(f"   ✅ Loaded {len(returned)} row(s) into {sql_table} for {type_}/usr {usr_id}")
 
+    # 2. everything else. The timeline's session columns hold (started_at, ended_at) tuples -> replace by ids.
     for table_name, rows in data.items():
-        if table_name == "sleep_sessions" or not rows:
+        if not rows:
+            continue
+        if table_name not in DESTINATION_TABLES:
+            msg = f"no destination table registered for '{table_name}' — {len(rows)} row(s) not loaded"
+            print(f"   ⚠️ {msg} ({type_}/usr {usr_id})")
+            issues.append(msg)
             continue
 
-        if table_name == "profile":
-            rows = dict(rows)  # don't mutate the parser's own output
-            rows["recorded_at"] = fetched_at
-            rows = [rows]  # single dict per device -> list of one to match _upsert_rows' expected shape
+        sql_table, conflict_cols, _ = DESTINATION_TABLES[table_name]
+        tagged = [{**r, "ingest_id": ingest_id} for r in rows]
 
-        if table_name == "sleep_stages":
-            resolved = []
-            for row in rows:
-                row = dict(row)  # don't mutate the parser's own output
-                session_start = row.pop("session_started_at", None)
-                row.pop("device_id", None)  # join key only — not a sleep_stages column
-                session_id = session_id_by_start.get(session_start)
-                if session_id is None:
-                    msg = (f"No matching sleep_session for stage at "
-                        f"{row.get('started_at')} — skipped")
-                    print(f"   ⚠️ {msg} ({device_type}/{device_id})")
-                    skip_reasons.append(msg)
-                    continue
-                row["session_id"] = session_id
-                resolved.append(row)
-            if resolved:
-                _upsert_rows(cur, SLEEP_STAGES_TABLE, resolved, SLEEP_STAGES_CONFLICT_COLS)
-                print(f"   ✅ Loaded {len(resolved)} row(s) into {SLEEP_STAGES_TABLE} for {device_type}/{device_id}")
-            continue
+        if table_name == TIMELINE_TABLE:
+            unlinked = 0
+            for row in tagged:
+                for session_table, fk_col in SESSION_TABLES:
+                    key = row.get(fk_col)
+                    if key is None:
+                        continue
+                    sid = session_ids.get(session_table, {}).get(tuple(key))
+                    row[fk_col] = sid
+                    if sid is None:
+                        unlinked += 1
+            if unlinked:
+                # expected on handover days: the session started in a neighbouring usr's window and was filtered out above
+                notes.append(f"{unlinked} timeline row(s) point at a session outside the usr window (session id left NULL)")
+        elif table_name == "atmotube2":
+            tagged = _prepare_atmotube_rows(tagged)
 
-        key = (device_type, table_name)
-        if key not in DESTINATION_TABLES:
-            msg = f"No destination table registered for {key} — {len(rows)} row(s) skipped"
-            print(f"   ⚠️ {msg}")
-            skip_reasons.append(msg)
-            continue
+        _upsert_rows(cur, sql_table, tagged, conflict_cols)
+        print(f"   ✅ Loaded {len(tagged)} row(s) into {sql_table} for {type_}/usr {usr_id}")
 
-        sql_table, conflict_cols = DESTINATION_TABLES[key]
-
-        if key in NO_INGEST_ID_TABLES:
-            tagged_rows = [dict(r) for r in rows]
+    # 3. account/profile snapshot
+    if profile:
+        if _load_profile(cur, usr_id, profile, ingest_id, pulled_at):
+            print(f"   ✅ Added {ACCOUNTS_TABLE} snapshot for {type_}/usr {usr_id}")
         else:
-            tagged_rows = [{**r, "ingest_id": ingest_id} for r in rows]
+            notes.append("profile unchanged since last snapshot")
 
-        if table_name == "readings" and device_type == "atmotube":
-            tagged_rows = _prepare_atmotube_rows(tagged_rows)
-        elif table_name == "readings" and device_type == "fitbit":
-            tagged_rows = _prepare_fitbit_readings_rows(tagged_rows)
-
-        _upsert_rows(cur, sql_table, tagged_rows, conflict_cols)
-        print(f"   ✅ Loaded {len(tagged_rows)} row(s) into {sql_table} for {device_type}/{device_id}")
-
-    return skip_reasons
+    return issues, notes
 
 
 def load_processed_data(
-    transformed: dict[str, dict[str, dict]],
-    ingest_ids: dict[tuple[str, str], int],
-    fetched_at: datetime,
-) -> None:
+    transformed: dict[str, dict[int, dict]],
+    ingest_ids: dict[tuple[str, int], int],
+    pulled_at: datetime,
+) -> dict[tuple[str, int], str]:
     """
-    Inserts transform.py's output into the processed schema tables (fitbit.*, atmotube.*).
-    Commits once PER DEVICE, not once for the whole batch — see module docstring.
-    Also logs one study.pipeline_runs row per device (start/finish/status/error),
-    via general.pipeline_logger, so failures are visible without reading stdout.
+    Inserts transform's output into readings.* / accounts.usr. Commits once PER usr_id and logs one raw.pipeline row per usr_id (success / partial / failed) via general.pipeline_logger.
 
-    A device with no ingest_id (its raw.ingests insert failed/skipped (AKA load_raw_data()) gets skipped entirely here rather than loaded with a NULL
-    ingest_id: a processed row with no traceable raw source is worse than no row.
+    A usr_id with no ingest_id (its raw.ingests insert failed or was skipped) is skipped entirely: a processed row with no traceable raw source is worse than no row.
+    A usr_id whose transform failed (entry carries "error") is logged 'failed' and nothing is loaded for it.
 
-    Parameters
-    ----------
-    transformed : dict
-        { device_type: { device_id: { "data": { table_name: [ {row}, ... ] } } } } —
-        output of transform.transform_device_data(). Every table_name's rows are
-        list[dict], ready for execute_values().
-    ingest_ids : dict
-        { (device_type, device_id): ingest_id } — output of load_raw_data().
-    fetched_at : datetime
-        Shared timestamp from load_raw_data()'s pull batch — stamped onto
-        fitbit.profile.recorded_at so each snapshot is anchored in time.
+    transformed : { type: { usr_id: {"data": { table_name: [row, ...] }, "error": optional str} } }  -- transform_usr_data() output
+    ingest_ids  : { (type, usr_id): ingest_id }  -- load_raw_data() output
+    pulled_at   : shared timestamp of the pull batch; stamped on accounts.usr.recorded_at
+
+    Returns { (type, usr_id): "success" | "partial" | "failed" | "skipped" }.
     """
+    statuses: dict[tuple[str, int], str] = {}
     conn = connect_db()
     try:
-        for device_type, device_files in transformed.items():
-            for device_id, entry in device_files.items():
-                ingest_id = ingest_ids.get((device_type, device_id))
+        for type_, per_usr in transformed.items():
+            for usr_id, entry in per_usr.items():
+                key = (type_, usr_id)
+                ingest_id = ingest_ids.get(key)
                 if ingest_id is None:
-                    print(f"⚠️ No ingest_id for {device_type}/{device_id} "
-                        f"(raw.ingests insert likely failed or skipped) — skipping processed load.")
+                    print(f"⚠️ No ingest_id for {type_}/usr {usr_id} (raw.ingests insert likely failed or skipped) — skipping processed load.")
+                    statuses[key] = "skipped"
                     continue
 
-                data = entry.get("data", {})
-                run_id = start_run(conn, device_type, device_id)
+                run_id = start_run(conn, usr_id, type_)
+
+                if entry.get("error"):
+                    end_run(conn, run_id, status="failed", error_message=entry["error"])
+                    print(f"❌ {type_}/usr {usr_id}: {entry['error']}")
+                    statuses[key] = "failed"
+                    continue
+
                 try:
                     with conn.cursor() as cur:
-                        skip_reasons = _load_one_device(cur, device_type, device_id, data, ingest_id, fetched_at)
+                        issues, notes = _load_one_usr(cur, type_, usr_id, entry.get("data", {}), ingest_id, pulled_at)
                     conn.commit()
-                    if skip_reasons:
-                        summary = "; ".join(skip_reasons)
-                        end_run(conn, run_id, status="partial", error_message=summary)
-                        print(f"⚠️ Load partial for {device_type}/{device_id}: {len(skip_reasons)} issue(s) — {summary}")
+                    message = "; ".join(issues + notes) or None
+                    if issues:
+                        end_run(conn, run_id, status="partial", error_message=message)
+                        print(f"⚠️ Load partial for {type_}/usr {usr_id}: {len(issues)} issue(s) — {message}")
+                        statuses[key] = "partial"
                     else:
-                        end_run(conn, run_id, status="success")
+                        end_run(conn, run_id, status="success", error_message=message)
+                        if notes:
+                            print(f"ℹ️ {type_}/usr {usr_id}: {message}")
+                        statuses[key] = "success"
                 except Exception as e:
                     conn.rollback()
                     end_run(conn, run_id, status="failed", error_message=str(e))
-                    print(f"❌ Load failed for {device_type}/{device_id}: {e}")
-                    # Deliberately NOT re-raised — one device's failure shouldn't stop
-                    # the rest of the batch from loading. See module docstring.
+                    print(f"❌ Load failed for {type_}/usr {usr_id}: {e}")
+                    statuses[key] = "failed"
+                    # Deliberately NOT re-raised: one usr's failure must not stop the rest of the batch.
     finally:
         conn.close()
+    return statuses
 
 
 if __name__ == "__main__":
-    from extract.extract import extract_all_devices
-    from transform.transform import transform_device_data
+    from extract.extract import extract_all_usrs
+    from transform.transform import transform_usr_data
 
-    raw = extract_all_devices()
-    ingest_ids, fetched_at, skipped = load_raw_data(raw)
-    transformed = transform_device_data(raw)
-    load_processed_data(transformed, ingest_ids, fetched_at)
+    raw = extract_all_usrs()
+    ingest_ids, pulled_at, skipped = load_raw_data(raw)
+    transformed = transform_usr_data(raw)
+    load_processed_data(transformed, ingest_ids, pulled_at)

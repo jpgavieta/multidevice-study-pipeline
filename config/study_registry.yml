@@ -13,11 +13,11 @@
 #                           web access: https://cloud.atmo.com/ Email: sensailabs.research@gmail.com
 
 sites:
-  kolkata:
+  kolkata
 
 types:
-  - atmotube2: 
-  - fitbit6:
+  - atmotube2
+  - fitbit6
 
 access:
   - id: "0101"

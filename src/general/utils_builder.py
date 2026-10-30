@@ -25,6 +25,7 @@ Rules mirrored from the database (registry.usr):
 
 Test run (from repo root):
     PYTHONPATH=src python -m general.utils_builder config/study_registry.yml
+    PYTHONPATH=src python -m py_compile src/general/utils_builder.py
 """
 
 from datetime import date, datetime
@@ -38,6 +39,27 @@ Window = tuple[str, date, Optional[date]]  # (participant_id, start, end) of one
 
 # Account types whose credential is the hardware itself (an Atmotube MAC): expected to stay with ONE device.
 HARDWARE_BOUND_PREFIXES = ("atmotube",)
+
+# ============================================================================================================
+
+def resolve_usr(config: Config, usr: Entry) -> Entry:
+    """
+    registry.usr row -> what an API client needs to make calls. The ONLY place where a usr becomes a credential.
+
+    usr:     {"usr_id", "type", "acc_id", ...}  (a row of registry.usr; extract.load_usr_rows)
+    returns: {"usr_id", "type", "acc_id", "cred"}
+        acc_id  Fitbit: selects the stored OAuth token (extract/config/tokens.py).
+        cred    Atmotube: the device MAC. Fitbit: the Google login. Never log it, never store it.
+
+    Hand the result to a client and nowhere else: transform, load and the database only ever see usr_id + type.
+    Raises ValueError if the account is not in the yml or its type differs from the usr's type.
+    """
+    acc = _access_by_id(config, usr["acc_id"])
+    if acc.get("type") != usr["type"]:
+        raise ValueError(f"usr {usr['usr_id']}: credential type {acc.get('type')!r} != usr type {usr['type']!r}")
+    if not acc.get("cred"):
+        raise ValueError(f"usr {usr['usr_id']}: credential is empty (unset !ENV?)")
+    return {"usr_id": usr["usr_id"], "type": usr["type"], "acc_id": acc["id"], "cred": acc["cred"]}
 
 
 # ============================================================================================================
@@ -54,23 +76,6 @@ def to_date(d: DateLike) -> Optional[date]:
     return datetime.strptime(str(d), "%Y-%m-%d").date()
 
 
-def _require_date(d: DateLike, what: str) -> date:
-    """Like to_date, but a missing/invalid date is an error (use where a date is mandatory)."""
-    out = to_date(d)
-    if out is None:
-        raise ValueError(f"Invalid date for {what}: {d!r}")
-    return out
-
-
-def _in_range(target: date, start: DateLike, end: DateLike) -> bool:
-    start_d, end_d = to_date(start), to_date(end)
-    if start_d and target < start_d:
-        return False
-    if end_d and target >= end_d:  # end is exclusive: the switch-over day belongs to the new window
-        return False
-    return True
-
-
 def _windows_overlap(s1: DateLike, e1: DateLike, s2: DateLike, e2: DateLike) -> bool:
     """Half-open window overlap; None = unbounded."""
     a_start, b_start = to_date(s1) or date.min, to_date(s2) or date.min
@@ -80,13 +85,6 @@ def _windows_overlap(s1: DateLike, e1: DateLike, s2: DateLike, e2: DateLike) -> 
 
 # ============================================================================================================
 # Lookups
-
-def _device_by_id(config: Config, device_id: str) -> Entry:
-    for d in config["devices"]:
-        if d["id"] == device_id:
-            return cast(Entry, d)
-    raise ValueError(f"Unknown device_id '{device_id}'")
-
 
 def _access_by_id(config: Config, acc_id: str) -> Entry:
     for a in config["access"]:
@@ -105,127 +103,6 @@ def _usages(config: Config, device_id: Optional[str] = None, acc_id: Optional[st
             if acc_id is not None and u.get("acc_id") != acc_id:
                 continue
             out.append((p["id"], u))
-    return out
-
-
-def _active_usages(config: Config, device_id: str, on_date: date) -> list[tuple[str, Entry]]:
-    return [
-        (pid, u) for pid, u in _usages(config, device_id=device_id)
-        if _in_range(on_date, u.get("start_date"), u.get("end_date"))
-    ]
-
-
-def get_active_usage(config: Config, device_id: str, on_date: DateLike) -> Optional[tuple[str, str]]:
-    """(participant_id, acc_id) using device_id on on_date, or None if unassigned. Raises on overlap."""
-    d = _require_date(on_date, f"device '{device_id}'")
-    matches = _active_usages(config, device_id, d)
-    if len(matches) > 1:
-        raise ValueError(f"Device '{device_id}' is assigned to {[pid for pid, _ in matches]} on {d} -- overlapping usages")
-    if not matches:
-        return None
-    pid, u = matches[0]
-    return pid, str(u["acc_id"])
-
-
-def get_active_participant(config: Config, device_id: str, on_date: DateLike) -> Optional[str]:
-    """Participant wearing/holding device_id on on_date, or None if unassigned."""
-    usage = get_active_usage(config, device_id, on_date)
-    return usage[0] if usage else None
-
-
-def get_active_acc_id(config: Config, device_id: str, on_date: DateLike) -> str:
-    """The account in use on device_id on on_date. Raises ValueError if the device is unassigned (gap)."""
-    usage = get_active_usage(config, device_id, on_date)
-    if usage is None:
-        raise ValueError(f"No active usage for device '{device_id}' on {to_date(on_date)} -- gap?")
-    return usage[1]
-
-
-def get_active_access(config: Config, device_id: str, on_date: DateLike) -> str:
-    """Credential (Fitbit user / Atmotube MAC) to use for device_id on on_date."""
-    return str(_access_by_id(config, get_active_acc_id(config, device_id, on_date))["cred"])
-
-
-def get_participant_acc_id(participant: Entry, device_id: str, on_date: DateLike) -> Optional[str]:
-    """Account this participant uses on device_id on on_date, or None if not using it then."""
-    d = to_date(on_date)
-    if d is None:
-        return None
-    for u in participant.get("devices") or []:
-        if u.get("dvc_id") == device_id and _in_range(d, u.get("start_date"), u.get("end_date")):
-            acc_id = u.get("acc_id")
-            return str(acc_id) if acc_id is not None else None
-    return None
-
-
-# ============================================================================================================
-# Resolution for extract scripts: one call gives everything needed to pull data for a device on a date
-
-def device_family(type_: str) -> str:
-    """'fitbit6' -> 'fitbit', 'atmotube2' -> 'atmotube'. `type` in the YAML is the model; clients branch on the family."""
-    return str(type_).rstrip("0123456789")
-
-
-def _resolved(config: Config, pid: str, usage: Entry) -> Entry:
-    p = next(x for x in config["participants"] if x["id"] == pid)
-    dev = _device_by_id(config, usage["dvc_id"])
-    acc = _access_by_id(config, usage["acc_id"])
-    return {
-        # keys the existing extract clients already read from a "device" dict (old shape)
-        "id": dev["id"],
-        "type": device_family(dev["type"]),   # the family, as the old clients expect ("fitbit" / "atmotube")
-        "site": p["site"],                    # site now comes from the participant, not the device
-        "access": acc["cred"],                # the resolved credential (Fitbit user / Atmotube MAC)
-        # new
-        "model": dev["type"],                 # the YAML type, e.g. "fitbit6"
-        "acc_id": acc["id"],
-        "participant_id": pid,
-        "start_date": to_date(usage.get("start_date")),
-        "end_date": to_date(usage.get("end_date")),
-    }
-
-
-def resolve_usage(config: Config, device_id: str, on_date: DateLike, fallback_latest: bool = False) -> Optional[Entry]:
-    """
-    The usage (participant + account + site + credential) active on device_id on on_date, or None.
-    fallback_latest=True: if nobody has the device that day, use its most recent usage and mark the result
-    {"fallback": True} (useful for hardware checks, e.g. an Atmotube MAC does not depend on who carries it).
-    """
-    d = _require_date(on_date, f"device '{device_id}'")
-    matches = _active_usages(config, device_id, d)
-    if len(matches) > 1:
-        raise ValueError(f"Device '{device_id}' is assigned to {[pid for pid, _ in matches]} on {d} -- overlapping usages")
-    if matches:
-        return _resolved(config, *matches[0])
-    if fallback_latest:
-        rows = _usages(config, device_id=device_id)
-        if rows:
-            pid, u = max(rows, key=lambda r: to_date(r[1].get("start_date")) or date.min)
-            return {**_resolved(config, pid, u), "fallback": True}
-    return None
-
-
-def resolve_account(config: Config, acc_id: str, device_id: Optional[str] = None) -> Optional[Entry]:
-    """
-    Most recent usage of an account (optionally only on one device), resolved like resolve_usage but regardless of date.
-    For tools that target a specific account, e.g. a device that has had two Google accounts over time.
-    """
-    rows = _usages(config, device_id=device_id, acc_id=acc_id)
-    if not rows:
-        return None
-    pid, u = max(rows, key=lambda r: to_date(r[1].get("start_date")) or date.min)
-    return _resolved(config, pid, u)
-
-
-def resolve_active_usages(config: Config, on_date: DateLike, family: Optional[str] = None) -> list[Entry]:
-    """Every usage active on on_date (optionally only one device family: 'fitbit' / 'atmotube')."""
-    d = _require_date(on_date, "active-usage lookup")
-    out: list[Entry] = []
-    for pid, u in _usages(config):
-        if _in_range(d, u.get("start_date"), u.get("end_date")):
-            r = _resolved(config, pid, u)
-            if family is None or r["type"] == family:
-                out.append(r)
     return out
 
 
@@ -344,10 +221,6 @@ def validate_registry(config: Config) -> list[str]:
 def registry_warnings(config: Config) -> list[str]:
     """Non-blocking oddities worth a look."""
     warnings: list[str] = []
-
-    for site, value in (config.get("sites") or {}).items():
-        if not isinstance(value, dict):
-            warnings.append(f"sites.{site}: expected a mapping of key: path, got {type(value).__name__}")
 
     used_acc = {u.get("acc_id") for _, u in _usages(config)}
     for a in config.get("access") or []:

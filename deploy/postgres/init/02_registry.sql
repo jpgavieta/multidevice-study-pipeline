@@ -34,26 +34,29 @@ CREATE TABLE IF NOT EXISTS registry.acc (  -- account-only (e.g., "0101"); no cr
     UNIQUE (id, type)                        -- target for usr's composite FK
 );
 
-CREATE TABLE IF NOT EXISTS  registry.usr (  -- user = participant + device + account, over a date window
+
+CREATE TABLE IF NOT EXISTS registry.usr (  -- user = participant + device + account, over a date window
     id           BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     ppt_id       TEXT NOT NULL REFERENCES registry.ppt(id),
     dvc_id       TEXT NOT NULL,
     acc_id       TEXT NOT NULL,
     type         TEXT NOT NULL,              -- same type on device and account, enforced by both dvc+acc FKs
-    site         TEXT NOT NULL,              -- same site on participant, enforced by ppt FK
+    site         TEXT NOT NULL,              -- same site as the participant, enforced by the ppt FK
     started_at   DATE NOT NULL,
     ended_at     DATE,
     last_updated TIMESTAMPTZ NOT NULL DEFAULT now(),
-
-    FOREIGN KEY (ppt_id, site) REFERENCES registry.ppt(id, site),
+ 
+    FOREIGN KEY (ppt_id, site) REFERENCES registry.ppt(id, site) ON UPDATE CASCADE,  -- moving a participant to another site updates their usr rows too
     FOREIGN KEY (dvc_id, type) REFERENCES registry.dvc(id, type),
     FOREIGN KEY (acc_id, type) REFERENCES registry.acc(id, type),
-    UNIQUE (id, type, started_at),             -- upsert key only; overlap is handled below
+    UNIQUE (id, type),                       -- target for composite FKs (usr_id, type)
     CHECK (ended_at IS NULL OR ended_at > started_at),
     CONSTRAINT no_overlap_per_device  EXCLUDE USING gist (
-        dvc_id WITH =, daterange(started_at, COALESCE(ended_at, 'infinity'), '[)') WITH &&),
+        dvc_id WITH =, daterange(started_at, COALESCE(ended_at, 'infinity'), '[)') WITH &&)
+        DEFERRABLE INITIALLY IMMEDIATE,
     CONSTRAINT no_overlap_per_account EXCLUDE USING gist (
         acc_id WITH =, daterange(started_at, COALESCE(ended_at, 'infinity'), '[)') WITH &&)
+        DEFERRABLE INITIALLY IMMEDIATE
 );
 
 -- Views built on registry.usr/.ppt/.dvc, for Grafana panels

@@ -1,6 +1,4 @@
 # ./src/transform/register/atmotube_registry.py
-# standard_name must equal the real column name on atmotube.readings (src/load/schema/03_atmotube.sql) —
-# the parser writes these row-dicts straight through to execute_values(), no renaming happens at load time.
 
 ATMOTUBE_REGISTRY = {
     # raw_key:            (standard_name,          unit,        dtype,      category)
@@ -29,3 +27,7 @@ ATMOTUBE_REGISTRY = {
     "satellites_fixed":   ("satellites_fixed",     "count",     "Int64",    "sat"),
     "satellites_in_view": ("satellites_in_view",   "count",     "Int64",    "sat"),
 }
+
+
+# ====================================================================================================
+ALL_DATA_TYPES = {"atmotube2"}

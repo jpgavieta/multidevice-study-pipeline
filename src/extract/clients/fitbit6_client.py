@@ -27,10 +27,10 @@ DATES: start_date and end_date are both INCLUSIVE civil dates. Registry usage wi
 AUTH SAFETY: extract_raw_data() defaults to allow_interactive=False — un-onboarded devices fail loudly with a clear re-onboarding instruction rather than silently opening a browser. 
 Only onboard_new_fitbit.py should ever pass allow_interactive=True. 
 
-CONCURRENCY & RETRIES: concurrent fetches for one device are bounded by MAX_WORKERS_PER_DEVICE. 
+CONCURRENCY & RETRIES: concurrent fetches for one device are bounded by MAX_WORKERS_PER_USR. 
     -   Individual requests retry with exponential backoff on 429 (rate limited) or 5xx (server error) — see _request_with_retry.
-    -   No 429s observed yet at current settings; if the API starts rate-limiting in practice, MAX_WORKERS_PER_DEVICE is the number to tune down.
-NOTE: extract.py separately threads across devices, so TOTAL COCURRENT REQUESTS = MAX_WORKERS_PER_DEVICE * DEVICES being pulled simultaneously. 
+    -   No 429s observed yet at current settings; if the API starts rate-limiting in practice, MAX_WORKERS_PER_USR is the number to tune down.
+NOTE: extract.py separately threads across devices, so TOTAL COCURRENT REQUESTS = MAX_WORKERS_PER_USR * DEVICES being pulled simultaneously. 
 Paging multiplies requests per data type (dense samples like heart-rate need many pages), see PAGE_SIZE.
 
 KNOWN UNKNOWNS:
@@ -54,7 +54,7 @@ from threading import Lock
 
 
 
-MAX_WORKERS_PER_DEVICE = 4  # bounded on purpose — extract.py already threads across devices,
+MAX_WORKERS_PER_USR = 4  # bounded on purpose — extract.py already threads across devices,
                             # so an unbounded pool here would multiply out to dozens of simultaneous requests against the same API project
 
 MAX_RETRIES = 3
@@ -446,12 +446,12 @@ def fetch_data_type(access_token: str, data_type: str, start_date: str, end_date
         return _get_daily_rollup(access_token, data_type, start_date, end_date)
     return _get_data_points(access_token, data_type, start_date, end_date)
 
-
 def _fetch_one_type(access_token: str, data_type: str, start_date: str, end_date: str):
     """Returns (data_type, payload_or_None, error_or_None). A failed type comes back as (type, None, error), never as partial data."""
     try:
         return data_type, fetch_data_type(access_token, data_type, start_date, end_date), None
-    except (requests.HTTPError, ValueError, RuntimeError) as e:
+    except (requests.RequestException, ValueError, RuntimeError) as e:
+        # RequestException is the parent of HTTPError, ConnectionError and Timeout.
         return data_type, None, e
 
 
@@ -513,15 +513,11 @@ def _normalize_timestamp(data_type: str, value) -> str | None:
     print(f"    ⚠️ '{data_type}': unrecognized timestamp shape, could not parse: {value!r}")
     return None
 
-
-def find_earliest_data(device: dict, start_date: str, end_date: str) -> dict[str, str | None]:
-    """Returns {data_type: earliest_date_str_or_None} for this device over the given range."""
-    raw = extract_raw_data(device, start_date, end_date)
+def find_earliest_data(usr: dict, start_date: str, end_date: str) -> dict[str, str | None]:
+    """Returns {data_type: earliest_date_str_or_None} for this usr over the given range."""
+    raw = extract_raw_data(usr, start_date, end_date, include_profile=False)
     earliest = {}
     for data_type, payload in raw.items():
-        if data_type == "profile":
-            continue
-
         key = points_key(data_type)
 
         if not payload or not payload.get(key):
@@ -540,29 +536,32 @@ def find_earliest_data(device: dict, start_date: str, end_date: str) -> dict[str
     return earliest
 
 
-def extract_raw_data(device: dict, start_date: str, end_date: str, allow_interactive: bool = False) -> dict:
+def extract_raw_data(usr: dict, start_date: str, end_date: str, allow_interactive: bool = False,
+                    data_types=None, include_profile: bool = True) -> dict:
     """
-    Pulls all Fitbit data types for one device over one date range (both ends inclusive).
-    `device` is a resolved usage (general.utils_builder.resolve_usage / resolve_account): "id" for messages, "acc_id" selects the token.
+    Pulls Fitbit data types for one usr over one date range (both ends inclusive).
+    `usr` is extract.resolve_usr()'s output: "usr_id" for messages, "acc_id" selects the token.
+
+    data_types:      optional subset of DATA_TYPES to pull (default None = all of them). An empty list pulls nothing.
+    include_profile: set False to skip the profile call (e.g. backfill pulls of one endpoint over a gap); the result then has no "profile" key. 
     Returns raw, unmodified JSON response, every page merged:
         {"steps": {...}, "heart-rate": {...}, "sleep": {...}, "distance": {...}, "profile": {...}}
-    Any single data type failing doesn't stop the others: its entry is None and the error is printed. 
-    NOTE for callers: 
+    Any single data type failing doesn't stop the others: its entry is None and the error is printed.
+    NOTE for callers:
         -   None means FAILED; a type with no data in the range is a payload with an empty list. Don't treat them the same.
-        -   Data types are fetched concurrently, bounded to MAX_WORKERS_PER_DEVICE to avoid stacking on top of extract.py's own per-device threading. 
+        -   Data types are fetched concurrently, bounded to MAX_WORKERS_PER_USR to avoid stacking on top of extract.py's own per-usr threading.
         -   The access token is fetched ONCE, before the pool starts, and reused read-only across all workers.
     No OAuth-related concurrency risk here (that risk is specific to onboarding, guarded separately via allow_interactive).
     No parsing here — that's transform's job, later.
     """
-    dvc_id = device["id"]
-    acc_id = device["acc_id"]
+    usr_id = usr["usr_id"]
 
     try:
-        access_token = get_fitbit_token(acc_id, allow_interactive=allow_interactive)
+        access_token = get_fitbit_token(usr["acc_id"], allow_interactive=allow_interactive)
     except Exception as e:
-        raise NotImplementedError(
-            f"Fitbit client not yet wired up for {dvc_id} (account {acc_id}): {e}"
-        ) from e
+        raise RuntimeError(f"no usable Fitbit token for usr {usr_id}: {e}") from e
+
+    types_to_pull = DATA_TYPES if data_types is None else data_types
 
     raw = {}
     print_lock = Lock()
@@ -571,21 +570,22 @@ def extract_raw_data(device: dict, start_date: str, end_date: str, allow_interac
         with print_lock:
             print(msg)
 
-    with ThreadPoolExecutor(max_workers=MAX_WORKERS_PER_DEVICE) as executor:
+    with ThreadPoolExecutor(max_workers=MAX_WORKERS_PER_USR) as executor:
         futures = {
             executor.submit(_fetch_one_type, access_token, dt, start_date, end_date): dt
-            for dt in DATA_TYPES
+            for dt in types_to_pull
         }
         for future in as_completed(futures):
             data_type, payload, error = future.result()
             if error is not None:
-                safe_print(f"  ⚠️ '{dvc_id}' failed to fetch '{data_type}': {error}")
+                safe_print(f"  ⚠️ usr {usr_id} failed to fetch '{data_type}': {error}")
             raw[data_type] = payload
 
-    try:
-        raw["profile"] = get_profile(access_token)
-    except requests.HTTPError as e:
-        print(f"  ⚠️ '{dvc_id}' failed to fetch profile: {e}")
-        raw["profile"] = None
+    if include_profile:
+        try:
+            raw["profile"] = get_profile(access_token)
+        except requests.RequestException as e:
+            print(f"  ⚠️ usr {usr_id} failed to fetch profile: {e}")
+            raw["profile"] = None
 
     return raw

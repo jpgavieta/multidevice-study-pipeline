@@ -30,17 +30,16 @@ NOTE:   on the same connection, commit() also commits any pending work of the ca
 _END_STATUSES = {"success", "failed", "partial"}
 
 
-def start_run(conn, usr_id: int) -> int:
+def start_run(conn, usr_id: int, type: str) -> int:
     """Inserts a new in-progress row (status 'running', started_at = now()), returns its id for end_run()."""
     with conn.cursor() as cur:
         cur.execute(
-            "INSERT INTO raw.pipeline (usr_id) VALUES (%s) RETURNING id",
-            (usr_id,),
+            "INSERT INTO raw.pipeline (usr_id, type) VALUES (%s, %s) RETURNING id",
+            (usr_id, type),
         )
         run_id = cur.fetchone()[0]
     conn.commit()
     return run_id
-
 
 def end_run(conn, run_id: int, status: str, error_message: str | None = None) -> None:
     """

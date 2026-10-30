@@ -5,13 +5,25 @@ study_registry.yml  ->  registry.* tables (deploy/postgres/init/02_registry.sql)
 The yml is the single source of truth. sync_all() makes the database mirror it:
     1. load the yml (resolving every !ENV tag) and validate it -- bad yml blocks the sync
     2. in ONE transaction:
-            a. delete registry.usr rows that are no longer in the yml
-            b. UPSERT type, site, dvc, ppt, acc, usr (parents before children)
-            c. delete type/site/dvc/ppt/acc rows that are no longer in the yml (children before parents)
+            a.  UPSERT type, site, dvc, ppt, acc (parents before children)
+            b.  sync registry.usr: update rows in place, insert new ones, delete the ones no longer in the yml
+                (see "usr rows keep their id" below)
+            c.  delete type/site/dvc/ppt/acc rows that are no longer in the yml (children before parents)
         Any error rolls the whole thing back.
 
+usr rows keep their id
+    registry.usr.id is what every reading, ingest, pipeline run and coverage row points at, so a usr row must NOT be
+    deleted and re-inserted just because the yml was corrected. A yml usr entry is matched to an existing row by:
+        1.  (dvc_id, started_at) -- the usual case, nothing about the window changed
+        2.  otherwise: the same ppt_id + dvc_id + acc_id with an overlapping window -- a corrected start/end date.
+            The row is UPDATEd in place, so its id (and everything stamped with it) is kept.
+    Entries matching neither are inserted; rows matching no entry are deleted. A delete or insert that would orphan
+    data fails loudly on the foreign keys, which is deliberate: re-attributing a window to a different participant,
+    device or account means previously loaded readings belong to someone else, and that needs a human decision.
+    The overlap constraints are DEFERRABLE, so all corrections are checked together at COMMIT, in any order.
+
 Credentials (Fitbit google account / Atmotube MAC) are resolved in memory by load_registry() and are NEVER written to the database. 
-Extract step gets credentials from the loaded config (see utils_builder.get_active_access), not from Postgres.
+Extract step gets credentials from the loaded config (see utils_builder.resolve_usr), not from Postgres.
 """
 import logging
 import os
@@ -20,6 +32,7 @@ import yaml
 import psycopg2
 import psycopg2.extras
 from dataclasses import dataclass
+from datetime import date
 from pathlib import Path
 from typing import Any, Optional
 from dotenv import load_dotenv
@@ -122,27 +135,19 @@ def _list_of_dicts(raw: dict, key: str) -> list[dict]:
 
 def _normalize_sites(raw_sites: Any) -> dict[str, dict[str, Any]]:
     """
-    sites: is written as  {site: [ {key: value}, {key: value} ]}  -- a list of single-key mappings.
-    Merge each list into one dict so lookups work:  {site: {key: value, ...}}.
+    sites: is a list of site names, like types:
+        sites:
+            - kolkata
+
+    Returns {site: {}} so membership checks and build_site_rows work as before.
     """
     if raw_sites is None:
         return {}
-    if not isinstance(raw_sites, dict):
-        raise ValueError("'sites:' must be a mapping of site name -> settings")
-    out: dict[str, dict[str, Any]] = {}
-    for name, settings in raw_sites.items():
-        if settings is None:
-            out[name] = {}
-        elif isinstance(settings, dict):
-            out[name] = dict(settings)
-        elif isinstance(settings, list) and all(isinstance(s, dict) for s in settings):
-            merged: dict[str, Any] = {}
-            for s in settings:
-                merged.update(s)
-            out[name] = merged
-        else:
-            raise ValueError(f"site '{name}': settings must be a mapping or a list of mappings")
-    return out
+    if not isinstance(raw_sites, list) or not all(isinstance(s, str) and s for s in raw_sites):
+        raise ValueError("'sites:' must be a list of site names, e.g. `- kolkata`")
+    if len(set(raw_sites)) != len(raw_sites):
+        raise ValueError("'sites:' has duplicate entries")
+    return {s: {} for s in raw_sites}
 
 
 def load_registry(config_path: str = "config/study_registry.yml") -> dict[str, Any]:
@@ -152,7 +157,7 @@ def load_registry(config_path: str = "config/study_registry.yml") -> dict[str, A
 
     Yml schema:
         types[]:            type names, e.g. [atmotube2, fitbit6]
-        sites:              {site: [{setting: value}, ...]}                (normalized to {site: {setting: value}})
+        sites[]:            site names, e.g. [kolkata]                     (normalized to {site: {}})
         access[]:           id, type, cred (resolved !ENV -- in memory only, never written to the DB)
         devices[]:          id, type, start_date, end_date, notes
         participants[]:     id, site, start_date, end_date, notes,
@@ -164,8 +169,10 @@ def load_registry(config_path: str = "config/study_registry.yml") -> dict[str, A
         raise ValueError("Study registry root must be a mapping")
 
     types = raw.get("types") or []
-    if not isinstance(types, list):
-        raise ValueError("'types:' must be a list, e.g. [atmotube2, fitbit6]")
+    if not isinstance(types, list) or not all(isinstance(t, str) and t for t in types):
+        raise ValueError("'types:' must be a list of non-empty strings, e.g. [atmotube2, fitbit6]")
+    if len(set(types)) != len(types):
+        raise ValueError("'types:' has duplicate entries")
 
     sites = _normalize_sites(raw.get("sites"))
     access = _list_of_dicts(raw, "access")
@@ -253,11 +260,9 @@ def build_acc_rows(data: dict) -> list[dict[str, Any]]:
 
 def build_usr_rows(data: dict) -> list[dict[str, Any]]:
     """
-    One row per participants[].devices[] assignment. `type` is copied from the device;
+    One row per participants[].devices[] assignment. `type` is copied from the device and `site` from the participant;
     validate_registry guarantees the account has the same type (and the composite FKs enforce it).
-
-    Sorted by start date so that, when an assignment is closed and its successor starts the same day,
-    the closing UPDATE runs before the INSERT (otherwise the exclusion constraint would reject it).
+    Sorted by start date only so that logs and inserts are deterministic.
     """
     dvc_type = {d["id"]: d["type"] for d in data["devices"]}
     rows = [
@@ -266,6 +271,7 @@ def build_usr_rows(data: dict) -> list[dict[str, Any]]:
             "dvc_id": a["dvc_id"],
             "acc_id": a["acc_id"],
             "type": dvc_type[a["dvc_id"]],
+            "site": p["site"],
             "started_at": to_date(a["start_date"]),
             "ended_at": to_date(a.get("end_date")),
         }
@@ -277,7 +283,7 @@ def build_usr_rows(data: dict) -> list[dict[str, Any]]:
 
 
 # ============================================================================================================
-# Table specs + generic upsert / prune
+# Table specs + generic upsert / prune (every table except usr, which has its own sync below)
 # Table and column names come ONLY from these constants (never from yml), and are quoted with psycopg2.sql.Identifier anyway.
 
 @dataclass(frozen=True)
@@ -294,20 +300,16 @@ SITE_T = TableSpec("site", ("id",), ("text",), ("id",), stamped=False)
 DVC_T = TableSpec("dvc", ("id",), ("text",), ("id", "type", "started_at", "ended_at", "notes"), stamped=True)
 PPT_T = TableSpec("ppt", ("id",), ("text",), ("id", "site", "started_at", "ended_at", "notes"), stamped=True)
 ACC_T = TableSpec("acc", ("id",), ("text",), ("id", "type"), stamped=True)
-USR_T = TableSpec(
-    "usr", ("dvc_id", "started_at"), ("text", "date"),
-    ("ppt_id", "dvc_id", "acc_id", "type", "started_at", "ended_at"), stamped=True,
-)
 
-# parents before children
-SYNC_ORDER: tuple[tuple[TableSpec, Any], ...] = (
+# parents before children (usr comes after all of them and is handled by _sync_usr)
+PARENT_ORDER: tuple[tuple[TableSpec, Any], ...] = (
     (TYPE_T, build_type_rows),
     (SITE_T, build_site_rows),
     (DVC_T, build_dvc_rows),
     (PPT_T, build_ppt_rows),
     (ACC_T, build_acc_rows),
-    (USR_T, build_usr_rows),
 )
+
 
 def _upsert_query(spec: TableSpec) -> sql.Composable:
     """
@@ -356,26 +358,119 @@ def _prune(cur, spec: TableSpec, rows: list[dict[str, Any]]) -> int:
     return cur.rowcount
 
 
+# ============================================================================================================
+# registry.usr: matched to existing rows so that an id survives a corrected date
+
+USR_COLS = ("ppt_id", "dvc_id", "acc_id", "type", "site", "started_at", "ended_at")
+USR_IDENTITY = ("ppt_id", "dvc_id", "acc_id")   # who used what: changing these re-attributes data, so it is logged loudly
+
+
+def _overlaps(a: dict, b: dict) -> bool:
+    """Half-open [started_at, ended_at) overlap; ended_at None = open-ended."""
+    return a["started_at"] < (b["ended_at"] or date.max) and b["started_at"] < (a["ended_at"] or date.max)
+
+
+def _plan_usr_sync(existing: list[dict], wanted: list[dict]) -> tuple[list[tuple[dict, dict]], list[dict], list[dict]]:
+    """
+    Pure function (no database): works out what to do to registry.usr.
+    existing: current rows (with "id" and USR_COLS); wanted: rows from build_usr_rows().
+    Returns (updates, inserts, deletes):
+        updates: [(existing_row, wanted_row)] for rows that exist in the yml and differ from the database (id is kept)
+        inserts: wanted rows with no existing counterpart
+        deletes: existing rows that no yml entry maps to
+    """
+    by_key = {(e["dvc_id"], e["started_at"]): e for e in existing}
+    pairs: list[tuple[dict, dict]] = []
+    claimed: set[int] = set()
+    unmatched: list[dict] = []
+
+    for w in wanted:                                    # 1. same device + same start date
+        e = by_key.get((w["dvc_id"], w["started_at"]))
+        if e is not None and e["id"] not in claimed:
+            pairs.append((e, w))
+            claimed.add(e["id"])
+        else:
+            unmatched.append(w)
+
+    free = [e for e in existing if e["id"] not in claimed]
+    inserts: list[dict] = []
+    for w in unmatched:                                 # 2. same ppt + device + account, overlapping window = a corrected date
+        candidates = [e for e in free if all(e[c] == w[c] for c in USR_IDENTITY) and _overlaps(e, w)]
+        if len(candidates) == 1:
+            pairs.append((candidates[0], w))
+            free.remove(candidates[0])
+        else:
+            if len(candidates) > 1:
+                logger.warning("registry.usr: yml entry %s matches %d existing rows, inserting it as new", _describe(w), len(candidates))
+            inserts.append(w)
+
+    updates = [(e, w) for e, w in pairs if any(e[c] != w[c] for c in USR_COLS)]
+    return updates, inserts, free
+
+
+def _describe(r: dict) -> str:
+    return f"{r['ppt_id']}/{r['dvc_id']}/{r['acc_id']} [{r['started_at']}, {r['ended_at'] or 'open'})"
+
+
+def _sync_usr(cur, wanted: list[dict]) -> tuple[int, int, int]:
+    """Applies _plan_usr_sync to the database. Returns (updated, inserted, deleted). Needs the caller's transaction."""
+    cur.execute("SET CONSTRAINTS ALL DEFERRED")         # overlap checks run at COMMIT, so corrections can be applied in any order
+    cur.execute(sql.SQL("SELECT id, {} FROM registry.usr").format(sql.SQL(", ").join(map(sql.Identifier, USR_COLS))))
+    existing = [dict(zip(("id",) + USR_COLS, r)) for r in cur.fetchall()]
+
+    updates, inserts, deletes = _plan_usr_sync(existing, wanted)
+
+    if deletes:
+        cur.execute("DELETE FROM registry.usr WHERE id = ANY(%s)", ([e["id"] for e in deletes],))
+        for e in deletes:
+            logger.info("registry.usr %d removed: %s", e["id"], _describe(e))
+
+    set_clause = sql.SQL(", ").join(sql.SQL("{} = {}").format(sql.Identifier(c), sql.Placeholder(c)) for c in USR_COLS)
+    update_q = sql.SQL("UPDATE registry.usr SET {}, last_updated = now() WHERE id = %(id)s").format(set_clause)
+    for old, new in updates:
+        if any(old[c] != new[c] for c in USR_IDENTITY):
+            logger.warning("registry.usr %d RE-ATTRIBUTED: %s -> %s (readings already stamped with this id now belong to the new entry)",
+                        old["id"], _describe(old), _describe(new))
+        else:
+            logger.info("registry.usr %d updated: %s -> %s", old["id"], _describe(old), _describe(new))
+        cur.execute(update_q, {**new, "id": old["id"]})
+
+    insert_q = sql.SQL("INSERT INTO registry.usr ({}) VALUES ({})").format(
+        sql.SQL(", ").join(map(sql.Identifier, USR_COLS)),
+        sql.SQL(", ").join(map(sql.Placeholder, USR_COLS)),
+    )
+    for w in inserts:
+        cur.execute(insert_q, w)
+        logger.info("registry.usr added: %s", _describe(w))
+
+    return len(updates), len(inserts), len(deletes)
+
+
 def sync_registry(conn: "psycopg2.extensions.connection", data: dict[str, Any]) -> None:
     """
     Make registry.* mirror `data` (the output of load_registry) in a single transaction.
 
     Order matters:
-        -   stale usr rows go FIRST: if a start_date was corrected in the yml, the old (e.g., device_id, start_date) row would otherwise still be there when the new one is inserted, and the exclusion constraint would reject the overlap.
-        -   parents are upserted before children; stale parents are deleted after the children are clean.
+        -   parents (type, site, dvc, ppt, acc) are upserted first, so usr rows can reference them
+        -   usr rows are then updated / inserted / deleted (see _sync_usr)
+        -   stale parents are deleted last, after the usr rows that referenced them are gone
     """
-    rows = {spec.name: build(data) for spec, build in SYNC_ORDER}
+    rows = {spec.name: build(data) for spec, build in PARENT_ORDER}
+    usr_rows = build_usr_rows(data)
 
-    with conn:  # commit on success, rollback on any exception
+    with conn:  # commit on success, rollback on any exception (including a deferred overlap violation at COMMIT)
         with conn.cursor() as cur:
-            deleted = {USR_T.name: _prune(cur, USR_T, rows[USR_T.name])}
-
-            for spec, _ in SYNC_ORDER:
+            for spec, _ in PARENT_ORDER:
                 _upsert(cur, spec, rows[spec.name])
 
-            for spec, _ in reversed(SYNC_ORDER[:-1]):  # everything except usr, children first
+            n_updated, n_inserted, n_deleted = _sync_usr(cur, usr_rows)
+            deleted = {"usr": n_deleted}
+
+            for spec, _ in reversed(PARENT_ORDER):  # children first
                 deleted[spec.name] = _prune(cur, spec, rows[spec.name])
 
+    if n_updated or n_inserted:
+        logger.info("registry.usr: %d updated, %d added", n_updated, n_inserted)
     for name, n in deleted.items():
         if n:
             logger.info("registry.%s: removed %d row(s) no longer in the yml", name, n)

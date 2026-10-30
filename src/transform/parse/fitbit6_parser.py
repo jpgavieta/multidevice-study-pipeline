@@ -1,17 +1,17 @@
 # ./src/transform/parse/fitbit6_parser.py
 """
 Parses raw Fitbit / Google Health API responses (extract/clients/fitbit6_client.py) into row-dicts for the
-tables in readings.sql (column mappings live in ./src/transform/register/fitbit6_registry.py):
+tables in deploy/postgres/init/04_readings.sql / 05_accounts.sql (column mappings live in ./src/transform/register/fitbit6_registry.py):
 
     readings.fitbit6            continuous timeline          key "fitbit6"
     readings.fitbit6_days       one row per day              key "fitbit6_days"
     readings.fitbit6_sleep      one row per session          key "fitbit6_sleep"
     readings.fitbit6_exercise   one row per session          key "fitbit6_exercise"
     readings.fitbit6_ecg        one row per recording        key "fitbit6_ecg"
-    accounts.profile            single snapshot dict         key "profile"
+    accounts.usr                single snapshot dict         key "profile"
 
-Rows carry `usr_id`, NOT `usr_id` or `ingest_id`: load.py resolves usr_id from (usr_id, timestamp/date) via registry.usr
-and stamps ingest_id (both are NOT NULL in the tables).
+Rows carry `usr_id` (passed in by transform.py; extract pulls per registry.usr row, so it is already known) but NOT `ingest_id`:
+load.py stamps ingest_id (NOT NULL in the tables).
 
 THE CONTINUOUS TIMELINE (readings.fitbit6)
     -   Samples (hr, hrv, spo2...) keep their exact timestamps.
@@ -30,7 +30,7 @@ SESSIONS ON THE TIMELINE (columns "ecg", "exercise", "sleep" of readings.fitbit6
     datetimes. load.py must insert the session tables FIRST, read back id per (usr_id, started_at, ended_at), and replace
     each tuple with that id before inserting into readings.fitbit6. If two sessions of the same kind overlap, the one added last wins.
 
-Daily rows use Fitbit's own calendar date (ended_at = started_at + 1, exclusive); no timezone needed.
+Daily rows use Fitbit's own calendar date (ended_at = started_at + 1, exclusive). All other timestamps are tz-aware UTC.
 civilStartTime.date is used ONLY for types flagged date_source="civil" in the registry.
 
 Session tables CHECK (ended_at > started_at): a session without a usable, later end is skipped (and counted in the
@@ -50,7 +50,7 @@ from typing import Any
 import pandas as pd
 
 from ..register.fitbit6_registry import (
-    READINGS_REGISTRY, DAILY_REGISTRY, BESPOKE_DATA_TYPES, UNMAPPED_DATA_TYPES,
+    READINGS_DATA_TYPES, DAILY_DATA_TYPES, BESPOKE_DATA_TYPES, UNMAPPED_DATA_TYPES,
     STEP_SECONDS, HR_ZONE_NAMES, SLEEP_SUMMARY_COLUMNS,
     RR_STAGES, RR_FIELDS, RR_MATCH_WINDOW_HOURS, EXERCISE_METHOD_PATH,
 )
@@ -397,7 +397,7 @@ def _attach_respiratory(sleep_rows: list, rr_rows: list, stats: Counter):
 
 
 # ============================================================================================================
-# profile -> accounts.profile
+# profile -> accounts.usr
 
 def _parse_profile(payload: dict | None, usr_id: int) -> dict | None:
     """Single snapshot per pull; recorded_at is stamped in load.py (which skips it if attrs match the last snapshot)."""
@@ -418,10 +418,10 @@ def _parse_profile(payload: dict | None, usr_id: int) -> dict | None:
 # ============================================================================================================
 # entry point
 
-def parse(raw_data: dict, usr_id: int, timezone: str | None = None) -> dict:
+def parse(raw_data: dict, usr_id: int) -> dict:
     """
     raw_data: dict from extract.clients.fitbit6_client.extract_raw_data().
-    timezone: accepted so transform.py can call every parser the same way; NOT used (daily rows use Fitbit's own civil date).
+    usr_id: registry.usr id stamped on every row. Timestamps are tz-aware UTC; daily rows use Fitbit's own civil date.
     Returns row-dicts keyed by destination table; a key is omitted if it has no rows.
     """
     tl = _Timeline()
@@ -437,16 +437,16 @@ def parse(raw_data: dict, usr_id: int, timezone: str | None = None) -> dict:
         if not points:
             continue
 
-        reading_rules = READINGS_REGISTRY.get(data_type)
-        daily_rules = DAILY_REGISTRY.get(data_type)
+        reading_rules = READINGS_DATA_TYPES.get(data_type)
+        daily_rules = DAILY_DATA_TYPES.get(data_type)
         rules = reading_rules or daily_rules
         if rules and rules.get("verified") is False and data_type not in warned:
             warned.add(data_type)
             print(f"⚠️ '{data_type}' mapping is UNVERIFIED (guessed field names) - check the output.")
 
-        if data_type in READINGS_REGISTRY and reading_rules is not None:
+        if data_type in READINGS_DATA_TYPES and reading_rules is not None:
             _parse_readings_type(data_type, points, reading_rules, tl, stats)
-        elif data_type in DAILY_REGISTRY and daily_rules is not None:
+        elif data_type in DAILY_DATA_TYPES and daily_rules is not None:
             _parse_daily_type(data_type, points, daily_rules, days, usr_id)
         elif data_type == "daily-heart-rate-zones":
             _parse_hr_zones(points, days, usr_id, stats)
