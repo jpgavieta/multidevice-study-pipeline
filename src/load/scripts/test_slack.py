@@ -12,7 +12,7 @@ Confirms:
     3. the bot has actually been invited to SLACK_ALERT_CHANNEL
     4. the message renders as expected in Slack
 
-If this succeeds, you should see a message land in #pipeline-notifs (or whatever SLACK_ALERT_CHANNEL is set to) within a few seconds.
+If this succeeds, tere should be a message land in #pipeline-notifs (or whatever SLACK_ALERT_CHANNEL is set to) within a few seconds.
 """
 
 from datetime import datetime, timezone
@@ -41,7 +41,7 @@ def main():
         ),
     )
     print("Done -- check the logs above for any Slack delivery warnings, "
-          f"and check {SLACK_ALERT_CHANNEL} in Slack for the actual message.")
+        f"and check {SLACK_ALERT_CHANNEL} in Slack for the actual message.")
 
 
 if __name__ == "__main__":

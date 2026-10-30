@@ -1,23 +1,22 @@
 # src/load/scripts/test_pipeline.py
 """
-Debug script for the transform -> load wiring, for any registered device type.
+Debug script for the transform -> load wiring, for any type with a registered parser.
 
-Runs a real captured pull (from src/extract/scripts/inspect_data.py --full) through:
-    <type>_parser.parse() -> load.load_raw_data() -> load.load_processed_data(), against a REAL Postgres instance, then reads rows back to confirm they landed.
+Runs a real captured pull (raw JSON saved from a client's extract_raw_data()) for ONE usr through:
+    PARSER_REGISTRY[type].parse() -> load.load_raw_data() -> load.load_processed_data(), against a REAL Postgres instance, then reads rows back to confirm they landed.
 
-DESTRUCTIVE: inserts real rows into raw.ingests and the relevant processed tables for the given device_id. 
-Point this at a throwaway DB (src/load/scripts/test_db.sh) for a disposable ephemeral Postgres. 
-Refuses to run against anything that doesn't look like localhost/a "test" DB unless overridden.
+DESTRUCTIVE: inserts real rows into raw.ingests, raw.pipeline and the processed tables for the given usr_id.
+Point this at a throwaway DB (deploy/postgres/test_db.sh). 
+Refuses to run against anything that doesn't look like localhost / a "test" DB unless overridden.
 
-Not part of the pipeline. 
+Not part of the pipeline. Run manually after touching load.py, or after the parser's own test passes.
 
-Run manually after touching load.py, or after transform.scripts.test_parser passes; to confirm the parser's output actually lands correctly in Postgres. 
+Requires registry.usr to be populated in this DB (PYTHONPATH=src python -m load.scripts.seed_registry), because
+raw.ingests.usr_id is a foreign key into registry.usr. The usr's window matters too: load.py does not load rows outside
+[started_at, ended_at), so the expected counts below are computed AFTER the same window filter.
 
-Requires seed_study.py to have already run against this DB (study.devices/participants/registry be populated), because raw.ingests.device_id is FK-constrained against study.devices.
-
-USAGE:
-PYTHONPATH=src ./deploy/postgres/test_db.sh python -m load.scripts.test_pipeline fitbit_01
-PYTHONPATH=src ./deploy/postgres/test_db.sh python -m load.scripts.test_pipeline atmotube_01
+USAGE (usr_id = registry.usr.id; --input = a JSON capture of that usr's raw pull):
+    PYTHONPATH=src ./deploy/postgres/test_db.sh python -m load.scripts.test_pipeline 7 --input path/to/capture.json
 """
 
 import argparse
@@ -26,38 +25,13 @@ import os
 import sys
 from pathlib import Path
 
-from general.registry_builder import load_registry
 from general.db_connect import connect_db
-from load.load import load_raw_data, load_processed_data, DESTINATION_TABLES, SLEEP_STAGES_TABLE
-
-DEFAULT_INPUT_DIRS = {
-    "fitbit": Path("src/extract/config/secrets/fitbit"),
-    "atmotube": Path("src/extract/config/secrets/atmotube"),
-}
-
-
-def _load_raw(device_type: str, device_id: str, input_path: str | None) -> dict:
-    default_dir = DEFAULT_INPUT_DIRS.get(device_type)
-    if input_path:
-        path = Path(input_path)
-    else:
-        if default_dir is None:
-            sys.exit(f"❌ No default input directory registered for device_type '{device_type}'")
-        path = default_dir / f"{device_id}_full.json"
-    if not path.exists():
-        sys.exit(
-            f"❌ No raw JSON found at {path}. Generate one with:\n"
-            f"   python -m extract.scripts.inspect_data {device_id} --full"
-        )
-    return json.loads(path.read_text())
-
-
-def _get_device(device_id: str) -> dict:
-    devices = {d["id"]: d for d in load_registry()["devices"]}
-    device = devices.get(device_id)
-    if device is None:
-        sys.exit(f"❌ '{device_id}' not found in config/study_registry.yml")
-    return device
+from transform.transform import PARSER_REGISTRY
+from load.load import (
+    load_raw_data, load_processed_data,
+    DESTINATION_TABLES, SESSION_TABLES, ACCOUNTS_TABLE, TIMELINE_TABLE,
+    _get_window, _filter_window,
+)
 
 
 def _confirm_safe_db():
@@ -72,134 +46,107 @@ def _confirm_safe_db():
         )
 
 
-# ============================================================================================================
-# Fitbit-specific parse + verify
-
-def _parse_fitbit(device_id: str, timezone: str | None, raw_data: dict) -> tuple[dict, dict]:
-    from transform.parse import fitbit6_parser
-    if not timezone:
-        sys.exit(f"❌ '{device_id}' has no 'timezone' set -- required for daily-grain fields.")
-    parsed = fitbit6_parser.parse(raw_data, device_id, timezone)
-    expected_counts = {
-        table: (1 if table == "profile" else len(rows))
-        for table, rows in parsed.items()
-    }
-    return parsed, expected_counts
+def _get_usr_type(usr_id: int) -> str:
+    conn = connect_db()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT type FROM registry.usr WHERE id = %s", (usr_id,))
+            row = cur.fetchone()
+    finally:
+        conn.close()
+    if row is None:
+        sys.exit(f"❌ usr_id {usr_id} not in registry.usr (run load.scripts.seed_registry against this DB first)")
+    return row[0]
 
 
-def _verify_fitbit(cur, device_id: str, expected_counts: dict) -> None:
-    for table_name, expected_count in expected_counts.items():
-        if table_name == "sleep_stages":
-            sql_table = SLEEP_STAGES_TABLE
-            where_clause = "session_id IN (SELECT id FROM fitbit.sleep_sessions WHERE device_id = %s)"
-        else:
-            key = ("fitbit", table_name)
-            if key not in DESTINATION_TABLES:
-                print(f"   ⚠️ No destination table registered for {key} -- load.py silently skips these rows.")
-                continue
-            sql_table, _ = DESTINATION_TABLES[key]
-            where_clause = "device_id = %s"
+def _expected_counts(cur, usr_id: int, parsed: dict) -> dict[str, int]:
+    """Rows we expect to find per parser key: in-window rows, collapsed on the table's conflict key (as the upsert does)."""
+    window = _get_window(cur, usr_id)
+    expected: dict[str, int] = {}
+    for table_name, rows in parsed.items():
+        if table_name == "profile":
+            expected["profile"] = 1
+            continue
+        if table_name not in DESTINATION_TABLES:
+            print(f"   ⚠️ No destination table registered for '{table_name}' -- load.py will report these rows as an issue.")
+            continue
+        _, conflict_cols, time_col = DESTINATION_TABLES[table_name]
+        kept, n_out = _filter_window(rows, time_col, window)
+        if n_out:
+            print(f"   ℹ️ {table_name}: {n_out} of {len(rows)} parsed row(s) fall outside the usr window and will NOT be loaded")
+        expected[table_name] = len({tuple(r.get(c) for c in conflict_cols) for r in kept})
+    return expected
 
-        cur.execute(f"SELECT COUNT(*) FROM {sql_table} WHERE {where_clause}", (device_id,))
+
+def _verify(cur, usr_id: int, expected: dict[str, int]) -> None:
+    for table_name, expected_count in expected.items():
+        sql_table = ACCOUNTS_TABLE if table_name == "profile" else DESTINATION_TABLES[table_name][0]
+        cur.execute(f"SELECT COUNT(*) FROM {sql_table} WHERE usr_id = %s", (usr_id,))
         result = cur.fetchone()
-        actual_count = result[0] if result is not None else 0
+        actual = result[0] if result is not None else 0
 
-        if actual_count == expected_count:
-            print(f"   ✅ {sql_table}: {actual_count} row(s) (matches parser output)")
-        elif actual_count < expected_count:
-            print(f"   ⚠️ {sql_table}: expected {expected_count}, found {actual_count} -- check for "
-                f"skipped rows (e.g. unresolved sleep_stage session_id, duplicate UNIQUE-key collisions).")
+        if table_name == "profile":
+            print(f"   {'✅' if actual >= 1 else '⚠️'} {sql_table}: {actual} snapshot(s)")
+        elif actual == expected_count:
+            print(f"   ✅ {sql_table}: {actual} row(s) (matches parser output)")
+        elif actual < expected_count:
+            print(f"   ⚠️ {sql_table}: expected {expected_count}, found {actual} -- check the raw.pipeline message for skipped rows.")
         else:
-            print(f"   ⚠️ {sql_table}: found MORE rows ({actual_count}) than parsed ({expected_count}) -- "
-                f"likely pre-existing data from a prior run against this DB.")
+            print(f"   ⚠️ {sql_table}: found MORE rows ({actual}) than parsed ({expected_count}) -- likely pre-existing data from a prior run against this DB.")
 
-    # activity-level (categorical) rows: confirm where the state value actually landed.
-    cur.execute(
-        "SELECT tag, value_text FROM fitbit.readings "
-        "WHERE device_id = %s AND data_type = 'activity-level' LIMIT 1",
-        (device_id,),
-    )
-    sample = cur.fetchone()
-    if sample:
-        tag_val, value_text_val = sample
-        print(f"   ℹ️ activity-level sample: tag={tag_val!r}, value_text={value_text_val!r} "
-            f"(module docstring says state should be in value_text -- confirm this is intended)")
+    # Session links on the fitbit6 timeline: every parsed session table should have produced linked timeline rows.
+    if TIMELINE_TABLE in expected:
+        timeline = DESTINATION_TABLES[TIMELINE_TABLE][0]
+        for session_table, fk_col in SESSION_TABLES:
+            if session_table in expected:
+                cur.execute(f"SELECT COUNT(*) FROM {timeline} WHERE usr_id = %s AND {fk_col} IS NOT NULL", (usr_id,))
+                linked = cur.fetchone()[0]
+                print(f"   {'✅' if linked else '⚠️'} {timeline}.{fk_col}: {linked} timeline row(s) linked to a {session_table} row")
 
-
-# ============================================================================================================
-# Atmotube-specific parse + verify
-
-def _parse_atmotube(device_id: str, timezone: str | None, raw_data: dict) -> tuple[dict, dict]:
-    from transform.parse import atmotube_parser
-    if not timezone:
-        print(f"  ⚠️ '{device_id}' has no 'timezone' -- fine as long as every 'date' "
-            f"value in the capture already carries a UTC offset.")
-    parsed = atmotube_parser.parse(raw_data, device_id, timezone)
-    expected_counts = {"readings": len(parsed.get("readings", []))}
-    return parsed, expected_counts
-
-
-def _verify_atmotube(cur, device_id: str, expected_counts: dict) -> None:
-    sql_table, _ = DESTINATION_TABLES[("atmotube", "readings")]
-    expected_count = expected_counts["readings"]
-
-    cur.execute(f"SELECT COUNT(*) FROM {sql_table} WHERE device_id = %s", (device_id,))
-    result = cur.fetchone()
-    actual_count = result[0] if result is not None else 0
-
-    if actual_count == expected_count:
-        print(f"   ✅ {sql_table}: {actual_count} row(s) (matches parser output)")
-    else:
-        print(f"   ⚠️ {sql_table}: expected {expected_count}, found {actual_count} -- check for "
-            f"duplicate recorded_at values colliding on upsert, or pre-existing data in this DB.")
-
-    cur.execute(
-        f"SELECT COUNT(*) FROM {sql_table} WHERE device_id = %s AND location IS NOT NULL",
-        (device_id,),
-    )
-    result = cur.fetchone()
-    geo_count = result[0] if result is not None else 0
-    print(f"   ℹ️ {geo_count}/{actual_count} row(s) have a non-NULL location (GPS fix present)")
+    # Atmotube: location is built by load.py from latitude/longitude.
+    if "atmotube2" in expected:
+        table = DESTINATION_TABLES["atmotube2"][0]
+        cur.execute(f"SELECT COUNT(*) FROM {table} WHERE usr_id = %s AND location IS NOT NULL", (usr_id,))
+        geo = cur.fetchone()[0]
+        print(f"   ℹ️ {geo}/{expected['atmotube2']} row(s) have a non-NULL location (GPS fix present)")
 
 
 # ============================================================================================================
-
-PARSE_FUNCS = {"fitbit": _parse_fitbit, "atmotube": _parse_atmotube}
-VERIFY_FUNCS = {"fitbit": _verify_fitbit, "atmotube": _verify_atmotube}
 
 
 def main():
-    ap = argparse.ArgumentParser(description="Test transform->load wiring for a device against a real (test) DB.")
-    ap.add_argument("device_id")
-    ap.add_argument("--input", default=None, help="Path to a *_full.json capture")
+    ap = argparse.ArgumentParser(description="Test transform->load wiring for one usr against a real (test) DB.")
+    ap.add_argument("usr_id", type=int, help="registry.usr.id")
+    ap.add_argument("--input", required=True, help="Path to a JSON capture of this usr's raw pull")
     ap.add_argument("--i-know-this-is-destructive", action="store_true", help="Skip the safe-DB heuristic check")
     args = ap.parse_args()
 
     if not args.i_know_this_is_destructive:
         _confirm_safe_db()
 
-    device = _get_device(args.device_id)
-    device_type = device["type"]
-    timezone = device.get("timezone")
+    usr_id = args.usr_id
+    usr_type = _get_usr_type(usr_id)
+    if usr_type not in PARSER_REGISTRY:
+        sys.exit(f"❌ No parser registered for type '{usr_type}'")
 
-    if device_type not in PARSE_FUNCS:
-        sys.exit(f"❌ No pipeline test registered for device_type '{device_type}'")
+    path = Path(args.input)
+    if not path.exists():
+        sys.exit(f"❌ No raw JSON found at {path}")
+    raw_data = json.loads(path.read_text())
 
-    raw_data = _load_raw(device_type, args.device_id, args.input)
-
-    print(f"\n[1/4] Parsing {args.device_id} (type={device_type}, tz={timezone})...")
-    parsed, expected_counts = PARSE_FUNCS[device_type](args.device_id, timezone, raw_data)
-    print(f"   Parsed: {expected_counts}")
+    print(f"\n[1/4] Parsing usr {usr_id} (type={usr_type})...")
+    parsed = PARSER_REGISTRY[usr_type].parse(raw_data, usr_id)
+    print(f"   Parsed: { {k: (1 if k == 'profile' else len(v)) for k, v in parsed.items()} }")
 
     print(f"\n[2/4] Loading raw payload into raw.ingests...")
-    all_data = {device_type: {args.device_id: {"payload": raw_data, "ingest_method": "test_script"}}}
+    all_data = {usr_type: {usr_id: {"payload": raw_data, "ingest_method": "test"}}}
     ingest_ids, fetched_at, _ = load_raw_data(all_data)
-    assert (device_type, args.device_id) in ingest_ids, "load_raw_data() did not return an ingest_id for this device"
-    print(f"   ✅ ingest_id = {ingest_ids[(device_type, args.device_id)]}")
+    assert (usr_type, usr_id) in ingest_ids, "load_raw_data() did not return an ingest_id for this usr"
+    print(f"   ✅ ingest_id = {ingest_ids[(usr_type, usr_id)]}")
 
     print(f"\n[3/4] Loading processed data...")
-    transformed = {device_type: {args.device_id: {"data": parsed}}}
-    load_processed_data(transformed, ingest_ids, fetched_at)  # doesn't raise on device-level failure, by design -- see [4/4]
+    transformed = {usr_type: {usr_id: {"data": parsed}}}
+    load_processed_data(transformed, ingest_ids, fetched_at)  # doesn't raise on a usr-level failure, by design -- see [4/4]
 
     print(f"\n[4/4] Verifying raw.pipeline + row counts...")
     conn = connect_db()
@@ -207,20 +154,21 @@ def main():
         with conn.cursor() as cur:
             cur.execute(
                 "SELECT status, error_message FROM raw.pipeline "
-                "WHERE device_type = %s AND device_id = %s ORDER BY id DESC LIMIT 1",
-                (device_type, args.device_id),
+                "WHERE usr_id = %s AND type = %s ORDER BY id DESC LIMIT 1",
+                (usr_id, usr_type),
             )
             row = cur.fetchone()
-            assert row is not None, "No raw.pipeline row was logged for this device"
+            assert row is not None, "No raw.pipeline row was logged for this usr"
             status, error_message = row
             assert status in ("success", "partial"), f"raw.pipeline logged status={status!r}, error={error_message!r}"
-            print(f"   ✅ raw.pipeline: status={status}" + (f" ({error_message})" if status == "partial" else ""))
+            print(f"   ✅ raw.pipeline: status={status}" + (f" ({error_message})" if error_message else ""))
 
-            VERIFY_FUNCS[device_type](cur, args.device_id, expected_counts)
+            expected = _expected_counts(cur, usr_id, parsed)
+            _verify(cur, usr_id, expected)
     finally:
         conn.close()
 
-    print(f"\n✅ {args.device_id}: transform -> load wiring test complete.")
+    print(f"\n✅ usr {usr_id}: transform -> load wiring test complete.")
 
 
 if __name__ == "__main__":
