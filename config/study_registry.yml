@@ -5,15 +5,15 @@
 # ============================================================================================================
 
 # DEVICES + ACCESS cred
-#   -   fitbit6 access -> google accounts are stored in ./extract/secrets/fitbit6/.env.access 
-#                         file path: extract/config/secrets/atmotube2/api_key.json
-#                         web access: https://console.cloud.google.com/ Cloud Project ID: fitbit6-multi-user-dev
-#   -   atmotube2 access -> hardware ids are stored in .extract/secrets/atmotube2/.env.access 
-#                           file path: extract/config/secrets/fitbit6/client_secret.json 
-#                           web access: https://cloud.atmo.com/ Email: sensailabs.research@gmail.com
+#   - fitbit6    ->  google accounts are stored in ./extract/secrets/fitbit6/.env.access 
+#                    file path: extract/config/secrets/atmotube2/api_key.json
+#                    web access: https://console.cloud.google.com/ Cloud Project ID: fitbit6-multi-user-dev
+#   - atmotube2  ->  hardware ids are stored in .extract/secrets/atmotube2/.env.access 
+#                    file path: extract/config/secrets/fitbit6/client_secret.json 
+#                    web access: https://cloud.atmo.com/ Email: sensailabs.research@gmail.com
 
 sites:
-  kolkata
+  - kolkata
 
 types:
   - atmotube2
@@ -68,38 +68,38 @@ access:
 devices:
   - id: atmo_01
     type: atmotube2
-    start_date: 2026-06-30  # NOTE: its day AFTER the CSV's last real row, not the API pairing date (for all 2026-07-13, except 07)
+    start_date: 2026-06-16
     end_date: null
     notes: ""
   - id: atmo_02
     type: atmotube2
-    start_date: 2026-07-03
+    start_date: 2026-06-15
     end_date: null
     notes: ""
   - id: atmo_03
     type: atmotube2
-    start_date: 2026-06-25
+    start_date: 2026-06-15
     end_date: null
     notes: ""
   - id: atmo_04
     type: atmotube2
-    start_date: 2026-07-03
+    start_date: 2026-06-15
     end_date: null
     notes: ""
   - id: atmo_05
     type: atmotube2
-    start_date: 2026-07-03
+    start_date: 2026-06-15
     end_date: null
     notes: ""
   - id: atmo_06
     type: atmotube2
-    start_date: 2026-07-05
+    start_date: 2026-06-15
     end_date: null
     notes: ""
 
   - id: fit_01
     type: fitbit6
-    start_date: 2026-06-15
+    start_date: 2026-06-16
     end_date: null
     notes: ""
   - id: fit_02
