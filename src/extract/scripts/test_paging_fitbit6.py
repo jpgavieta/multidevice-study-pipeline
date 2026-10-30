@@ -1,3 +1,5 @@
+# ./src/extract/scripts/test_paging_fitbit6.py
+
 import pytest
 import requests
 from extract.clients import fitbit6_client as c

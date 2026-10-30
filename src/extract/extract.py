@@ -2,15 +2,20 @@
 """
 API pull logic: one pull per registry.usr row (usr_id), threaded across usrs. NOTE: Must be invoked by APScheduler.
 
-This is the last module that knows about credentials. resolve_usr() turns a usr row into {"usr_id", "type", "acc_id", "cred"},
-which goes to the client and nowhere else. Everything returned from here (and everything downstream: transform, load, raw.*, readings.*)
-is keyed on usr_id + type.
+THIS IS THE LAST MODULE TO KNOW ABT CREDENTIALS (cred). 
+    resolve_usr() --> a usr row into {"usr_id", "type", "acc_id", "cred"}, which goes to the client and nowhere else. 
+    Everything returned from here (and everything downstream: transform, load, raw.*, readings.*) is keyed on usr_id + type.
 
 Dates: the usr's window [started_at, ended_at) in registry.usr is the source of truth; the yml only supplies credentials.
 Every pull is clipped to that window, so two usrs that shared a device (same Atmotube MAC, different participants) never pull each other's days.
+"Today" is the UTC date (everything in the pipeline is UTC).
+
+Each returned entry carries the window that was actually pulled, "window": (start, end_inclusive), 
+    so the caller can record what was scanned in raw.pull_coverage (see main.py / load/coverage.py). 
+    transform and load ignore this key.
 """
 
-from datetime import date, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from threading import Lock
 
@@ -37,7 +42,7 @@ CLIENT_REGISTRY = {  # keyed by registry.usr.type
 MAX_PARALLEL_USRS = 12
 
 # Must match raw.ingests.ingest_method's CHECK constraint (deploy/postgres/init/03_raw.sql).
-# 'csv_manual' is never produced here (go to src/extract/scripts/backfill_atmotube.py.)
+# 'csv_manual' is never produced here (go to src/extract/scripts/add_csv_atmotube2.py.)
 VALID_INGEST_METHODS = {"api_auto", "api_manual", "csv_manual"}
 
 # A scheduled run should only ever cover a day or two.
@@ -122,12 +127,15 @@ def _pull_one_usr(client_usr: dict, start_date: str, end_date: str):
 
 def extract_all_usrs(config_path="config/study_registry.yml", end_date=None,
                     max_workers=MAX_PARALLEL_USRS, ingest_method="api_auto") -> dict[str, dict[int, dict]]:
-    """Returns { type: { usr_id: {"payload", "ingest_method"} } }. A usr that failed or had nothing to pull has no entry."""
+    """
+    Returns { type: { usr_id: {"payload", "ingest_method", "window"} } }, where window = (start, end_inclusive) as dates.
+    A usr that failed or had nothing to pull has no entry.
+    """
     if ingest_method not in VALID_INGEST_METHODS:
         raise ValueError(f"Invalid ingest_method={ingest_method!r}; must be one of {VALID_INGEST_METHODS}")
 
     config = load_registry(config_path)
-    end_date_obj = date.fromisoformat(end_date) if end_date else date.today()
+    end_date_obj = date.fromisoformat(end_date) if end_date else datetime.now(timezone.utc).date()
 
     conn = connect_db()
     try:
@@ -153,6 +161,7 @@ def extract_all_usrs(config_path="config/study_registry.yml", end_date=None,
         plans.append((client_usr, start, end_incl))
 
     all_data: dict[str, dict[int, dict]] = {}
+    windows = {client_usr["usr_id"]: (start, end_incl) for client_usr, start, end_incl in plans}
     print_lock = Lock()
 
     def safe_print(msg):
@@ -180,6 +189,7 @@ def extract_all_usrs(config_path="config/study_registry.yml", end_date=None,
             all_data.setdefault(type_, {})[usr_id] = {
                 "payload": payload,
                 "ingest_method": ingest_method,
+                "window": windows[usr_id],
             }
             safe_print(f"   ✅ Pulled usr {usr_id} [{type_}]")
 
