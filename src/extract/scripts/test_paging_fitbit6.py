@@ -1,4 +1,13 @@
 # ./src/extract/scripts/test_paging_fitbit6.py
+"""
+Run these tests from the repository root:
+pytest -q src/extract/scripts/test_paging_fitbit6.py
+
+If Python cannot find the ``extract`` package, add ``src`` to the import path:
+PYTHONPATH=src pytest -q src/extract/scripts/test_paging_fitbit6.py
+
+NOTE: Use ``-v`` instead of ``-q`` to see each test name and result.
+"""
 
 import pytest
 import requests

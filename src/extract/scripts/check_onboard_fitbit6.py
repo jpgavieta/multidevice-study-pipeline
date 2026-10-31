@@ -18,10 +18,10 @@ Prerequisites for a NEW account/access:
 
 USAGE (from the repo root, PYTHONPATH=src):
 python -m extract.scripts.check_onboard_fitbit6 0208                   # is this account/access onboarded? (no browser)
-python -m extract.scripts.check_onboard_fitbit6 ppt_07 fit_05          # the account/access ppt_07 uses on fit_05
-python -m extract.scripts.check_onboard_fitbit6 ppt_08 fit_04 0208
-python -m extract.scripts.check_onboard_fitbit6 --all                  # every fitbit6 account/access in use today (UTC)
 python -m extract.scripts.check_onboard_fitbit6 0208 --onboard         # onboard it if it has no valid token
+python -m extract.scripts.check_onboard_fitbit6 ppt_07 fit_05          # the account/access ppt_05 uses with fit_05
+python -m extract.scripts.check_onboard_fitbit6 ppt_08 fit_04 0208     # all ids
+python -m extract.scripts.check_onboard_fitbit6 --all                  # every fitbit6 account/access in use today (UTC)
 python -m extract.scripts.check_onboard_fitbit6 --all --onboard        # onboard every account/access that needs it, one at a time
 
 Exit code is 1 if any account/access checked is not onboarded.

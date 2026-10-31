@@ -38,10 +38,11 @@ OVERLAP WITH THE API
     on every field it has and keeps the other's fields it lacks (COALESCE upsert), so loading order never loses data.
 
 USAGE (from the repo root, with PYTHONPATH=src):
-    python -m extract.scripts.add_csv_atmotube2                      # report only: what would be loaded, nothing written
-    python -m extract.scripts.add_csv_atmotube2 --usr 12 14          # only these usr ids
-    python -m extract.scripts.add_csv_atmotube2 --write-db           # load it
-    python -m extract.scripts.add_csv_atmotube2 --out preview.json   # also dump the payloads (participant data!) to inspect
+python -m extract.scripts.add_csv_atmotube2                      # report only: what would be loaded, nothing written
+python -m extract.scripts.add_csv_atmotube2 --usr 12 14          # only these usr ids
+python -m extract.scripts.add_csv_atmotube2 --write-db           # load it
+python -m extract.scripts.add_csv_atmotube2 --out preview.json   # also dump the payloads (participant data!) to inspect
+
 Re-running --write-db is safe (everything upserts) but stores the raw payloads again in raw.ingests.
 """
 
