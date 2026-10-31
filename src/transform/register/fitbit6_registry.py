@@ -210,3 +210,89 @@ UNMAPPED_DATA_TYPES = {
 ALL_DATA_TYPES = (
     set(READINGS_DATA_TYPES) | set(DAILY_DATA_TYPES) | set(BESPOKE_DATA_TYPES)
 )
+
+from datetime import datetime, timedelta
+
+def _py_type(dtype):
+    return {"int": int, "float": float}.get(dtype, str)
+
+def _reading_col_type(rules):
+    kind = rules["kind"]
+    if kind == "flag":
+        return bool
+    if kind in ("categorical", "tag_list"):
+        return str
+    if kind == "json":
+        return dict
+    return _py_type(rules.get("dtype"))  # scalar
+
+# timeline session columns -> the session table they reference (parser puts a (started_at, ended_at) tuple there; load.py swaps it for the session row's id). 
+# Same names as fitbit6_parser.SESSION_COLUMNS.
+_SESSION_REFS = {"sleep_id": "fitbit6_sleep", "exercise_id": "fitbit6_exercise", "ecg_id": "fitbit6_ecg"}
+
+_TIMELINE_TYPES = {r["column"]: _reading_col_type(r) for r in READINGS_DATA_TYPES.values()}
+
+_DAILY_TYPES = {}
+for _r in DAILY_DATA_TYPES.values():
+    if _r["kind"] == "fields":
+        for _col, _dtype in _r["fields"].values():
+            _DAILY_TYPES[_col] = _py_type(_dtype)
+    else:  # json_map / json
+        _DAILY_TYPES[_r["column"]] = dict
+for _zone in HR_ZONE_NAMES:  # written by the bespoke daily-heart-rate-zones branch
+    for _side in ("min", "max"):
+        _DAILY_TYPES[f"hr_zone_{_zone}_{_side}"] = int
+
+_RR_TYPES: dict[str, type] = {f"rr_{stage}_{suffix}": float for stage in RR_STAGES.values() for suffix in RR_FIELDS.values()}
+_RR_TYPES["rr_sample_end"] = datetime  # _attach_respiratory() copies this onto the sleep row too -- confirm it is a column in the SQL
+
+_SLEEP_MERGED_COLS =   {"usr_id", "started_at", "ended_at", "result_type", "nap",
+                    "sleep_stages_data", "sleep_sum_data", "metadata", *SLEEP_SUMMARY_COLUMNS.values()}
+_EXERCISE_COLS =    {"usr_id", "started_at", "ended_at", "result_type", "method", "calories_kcal", "hr_avg_bpm",
+                    "hr_zone_light_sec", "hr_zone_moderate_sec", "hr_zone_vigorous_sec", "hr_zone_peak_sec",
+                    "exercise_events", "metadata"}
+_ECG_COLS =         {"usr_id", "started_at", "ended_at", "result_type", "hr_avg_bpm", "sampling_hz",
+                    "millivolts_scf", "lead_num", "waveform_data"}
+
+OUTPUT_TABLES = {
+    # sparse/wide: a row only has the columns that had data at that instant
+    "fitbit6": {
+        "required": {"usr_id", "recorded_at"},
+        "allowed": {"usr_id", "recorded_at"} | set(_TIMELINE_TYPES) | set(_SESSION_REFS),
+        "time": "recorded_at",
+        "unique": ("usr_id", "recorded_at"),
+        "types": {**_TIMELINE_TYPES, **{c: tuple for c in _SESSION_REFS}},
+        "refs": _SESSION_REFS,
+    },
+    "fitbit6_days": {
+        "required": {"usr_id", "started_at", "ended_at"},
+        "allowed": {"usr_id", "started_at", "ended_at"} | set(_DAILY_TYPES),
+        "time": "started_at", "end": "ended_at", "span": timedelta(days=1),
+        "unique": ("usr_id", "started_at"),
+        "types": _DAILY_TYPES,
+    },
+    "fitbit6_sleep": {
+        "required": _SLEEP_MERGED_COLS,
+        "allowed": _SLEEP_MERGED_COLS | set(_RR_TYPES),
+        "time": "started_at", "end": "ended_at",
+        "unique": ("usr_id", "started_at", "ended_at"),
+        "types": {"nap": bool, **{c: int for c in SLEEP_SUMMARY_COLUMNS.values()}, **_RR_TYPES},
+    },
+    "fitbit6_exercise": {
+        "required": _EXERCISE_COLS, "allowed": _EXERCISE_COLS,
+        "time": "started_at", "end": "ended_at",
+        "unique": ("usr_id", "started_at", "ended_at"),
+        # method / exercise_events left untyped: EXERCISE_METHOD_PATH is still UNVERIFIED
+        "types": {"calories_kcal": float, "hr_avg_bpm": int, "hr_zone_light_sec": int, "hr_zone_moderate_sec": int,
+                "hr_zone_vigorous_sec": int, "hr_zone_peak_sec": int},
+    },
+    "fitbit6_ecg": {  # field names UNVERIFIED -> structure only
+        "required": _ECG_COLS, "allowed": _ECG_COLS,
+        "time": "started_at", "end": "ended_at",
+        "unique": ("usr_id", "started_at", "ended_at"),
+    },
+    "profile": {  # single dict, not a list: {"usr_id": int, "attrs": {...}}
+        "required": {"usr_id", "attrs"}, "allowed": {"usr_id", "attrs"},
+        "unique": ("usr_id",), "types": {"attrs": dict},
+    },
+}

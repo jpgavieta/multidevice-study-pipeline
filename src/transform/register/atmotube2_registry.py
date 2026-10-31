@@ -30,4 +30,19 @@ ATMOTUBE_REGISTRY = {
 
 
 # ====================================================================================================
-ALL_DATA_TYPES = {"atmotube2"}
+ALL_DATA_TYPES = {"merged_data"}
+
+_DTYPE_TO_PY = {"Int64": int, "float64": float, "boolean": bool}
+_BASE_COLS = {"usr_id", "recorded_at", "latitude", "longitude"}
+_SENSOR_TYPES = {name: _DTYPE_TO_PY[dtype] for name, _unit, dtype, _cat in ATMOTUBE_REGISTRY.values()}
+
+OUTPUT_TABLES = {
+    "atmotube2": {
+        # every row carries every column (value may be None), so required == allowed
+        "required": _BASE_COLS | set(_SENSOR_TYPES),
+        "allowed": _BASE_COLS | set(_SENSOR_TYPES),
+        "time": "recorded_at",
+        "unique": ("usr_id", "recorded_at"),
+        "types": {"latitude": float, "longitude": float, **_SENSOR_TYPES},
+    },
+}
