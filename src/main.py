@@ -6,26 +6,36 @@ This process is meant to be started ONCE (by systemd) and stay alive forever.
 
 It does not run the ETL itself on import.
 It defines ONE job function (run_daily_pipeline) that wraps the existing:
-    extract -> load_raw -> transform -> load_processed sequence
+    extract -> load_raw -> transform -> load_processed -> record coverage -> bounded backfill
 Hands that function + a schedule to APScheduler, and then blocks forever inside scheduler.start().
 
 Division of responsibility (why this file is short):
-    - extract.py / transform.py / load.py      -> already do the real ETL work, already isolates failures per-device internally
-    - pipeline_logger.py                       -> already logs per-device success/failed/partial runs into raw.pipeline, called from inside load_processed_data()
+    - extract.py / transform.py / load.py      -> already do the real ETL work, already isolates failures per-usr internally
+    - pipeline_logger.py                       -> already logs per-usr success/failed/partial runs into raw.pipeline, called from inside load_processed_data()
+    - load/coverage.py + load/backfill.py      -> raw.pull_coverage: what has been scanned, and pulling what has not
     - main.py (this file)                      -> only handles RUN-LEVEL concerns:
                                                     1. what time the daily job fires
                                                     2. retrying the whole run if something systemic fails (e.g. DB briefly unreachable)
                                                     3. alerting a human if the run fails even after retries
                                                     4. keeping the process alive (APScheduler's job -- systemd supervises the PROCESS, this is what supervises the SCHEDULE)
 
-Nothing here should duplicate per-device error handling -- that already exists one layer down. 
+Nothing here should duplicate per-usr error handling -- that already exists one layer down. 
 
-NOTE: If there is any writing here for a per-device try/except; it probably belongs in extract.py/load.py instead.
+NOTE: If there is any writing here for a per-usr try/except; it probably belongs in extract.py/load.py instead.
+
+DAILY PULL vs BACKFILL (two jobs, one schedule)
+    The daily pull is for FRESHNESS: it re-pulls from each usr's last success up to today (UTC).
+    Those days are too recent to certify (SYNC_LAG_DAYS in load/coverage.py: a watch can sync days late), so the daily pull
+    normally records NO coverage. The exception is a long pull (a brand-new usr, or after an outage): the part of it that is old
+    enough IS recorded, so the backfill step does not immediately redo it.
+    The BACKFILL STEP then pulls whatever is uncovered and old enough (each day, as it ages past the lag, plus any late syncs),
+    at most PIPELINE_BACKFILL_MAX_JOBS jobs per run. A large historical seed should be run by hand first:
+        PYTHONPATH=src python -m load.backfill --dry-run
 
 Checking the current UTC time... 
 date -u
 
-SANITY CHECK: python -c "from extract.extract import extract_all_devices; from transform.transform import transform_device_data; from load.load import load_raw_data, load_processed_data; from apscheduler.schedulers.blocking import BlockingScheduler; from apscheduler.triggers.cron import CronTrigger; from tenacity import retry, stop_after_attempt, wait_fixed, before_sleep_log; print('all imports OK')"
+SANITY CHECK: python -c "from extract.extract import extract_all_usrs; from transform.transform import transform_usr_data; from load.load import load_raw_data, load_processed_data; from load.coverage import record_pull_coverage; from load.backfill import run_backfill; from apscheduler.schedulers.blocking import BlockingScheduler; from apscheduler.triggers.cron import CronTrigger; from tenacity import retry, stop_after_attempt, wait_fixed, before_sleep_log; print('all imports OK')"
 TEST RUN: PYTHONPATH=src ./deploy/postgres/test_db.sh python src/main.py
 """
 
@@ -39,9 +49,12 @@ from tenacity import retry, stop_after_attempt, wait_fixed, before_sleep_log
 from apscheduler.schedulers.blocking import BlockingScheduler
 from apscheduler.triggers.cron import CronTrigger
 
-from extract.extract import extract_all_devices
-from transform.transform import transform_device_data
+from extract.extract import extract_all_usrs
+from general.db_connect import connect_db
+from transform.transform import transform_usr_data
 from load.load import load_raw_data, load_processed_data
+from load.scripts.pull_coverage import record_pull_coverage
+from load.scripts.backfill_readings import run_backfill
 
 # ============================================================================================================
 # CONFIGS
@@ -59,12 +72,18 @@ RUN_HOUR = int(os.environ.get("PIPELINE_RUN_HOUR", 22)) # UTC 22:00 = IST 03:30,
 RUN_MINUTE = int(os.environ.get("PIPELINE_RUN_MINUTE", 45))
 
 # --- Retry ---
-# This retries the WHOLE run-level sequence, not individual devices 
-#   Per device sequences are isolated inside extract/transform/load)
+# This retries the WHOLE run-level sequence, not individual usrs 
+#   Per usr sequences are isolated inside extract/transform/load)
 #   This is only meant to ride out something systemic and transient  (e.g. Postgres restarting, network blips on DB host) 
 #   Ex: If the DB is genuinely down for longer than this, retries exhaust and notify_failure() fires
 RETRY_ATTEMPTS = int(os.environ.get("PIPELINE_RETRY_ATTEMPTS", 3))
 RETRY_WAIT_SECONDS = int(os.environ.get("PIPELINE_RETRY_WAIT_SECONDS", 60))
+
+# --- Backfill step ---
+# Max backfill jobs (one job = one usr x one chunk of days x every data type with a gap there) per daily run. 0 turns the step off.
+# In steady state it needs about one job per usr per day (the day that just aged past the lag); the rest of the budget works
+# through older gaps (late syncs, failed pulls), oldest first, and a run that hits the cap just continues tomorrow.
+BACKFILL_MAX_JOBS = int(os.environ.get("PIPELINE_BACKFILL_MAX_JOBS", 40))
 
 # --- Slack alerting ---
 # Bot token + target channel live in deploy/.env, same tier as DB creds -- never hardcoded here.
@@ -89,7 +108,7 @@ log = logging.getLogger("multidevice_datakit")
 # NOTIFY
 
 # This is the only place a run-level failure is ever caught 
-# (per-device failures are already logged into raw.pipeline and don't need a live alert).
+# (per-usr failures are already logged into raw.pipeline and don't need a live alert).
 #
 # Posts to Slack via chat.postMessage (bot token, not a webhook -- SLACK_BOT_TOKEN
 # must be an actual xoxb- bot token with chat:write scope, and the bot must be
@@ -101,14 +120,14 @@ log = logging.getLogger("multidevice_datakit")
 # Slack integration should never crash a pipeline run that already succeeded/failed
 # on its own merits.
 #
-# Still an open decision: whether this should also fire on a high per-device
-# skip-rate from load_raw_data()'s `skipped` list, not just a full run-level
-# exception -- currently only run_daily_pipeline()'s except block calls this.
+# Still an open decision: whether this should also fire on a high per-usr
+# skip-rate from load_raw_data()'s `skipped` list, or on backfill jobs that keep failing (e.g. a dead Fitbit token),
+# not just a full run-level exception -- currently only run_daily_pipeline()'s except blocks call this.
 
 def notify_failure(subject: str, message: str) -> None:
     """
     Alerts a human that the daily run failed at the RUN level (not a single
-    device -- those are visible in raw.pipeline / logs, not alert-worthy here).
+    usr -- those are visible in raw.pipeline / logs, not alert-worthy here).
 
     Always logs at ERROR level (lands in the systemd journal regardless of
     Slack's availability), then attempts a Slack post as a second, best-effort
@@ -144,8 +163,41 @@ def notify_failure(subject: str, message: str) -> None:
 # THE JOB
 
 # This is the ONE function APScheduler calls. 
-# Everything it calls already exists in extract.py / load.py / transform.py
+# Everything it calls already exists in extract.py / load.py / transform.py / load/coverage.py / load/backfill.py
 # Only real job is sequencing + run-level retry + run-level failure alerting.
+
+
+def _record_daily_coverage(raw: dict, ingest_ids: dict, statuses: dict) -> None:
+    """
+    Records raw.pull_coverage for the usrs that loaded, for the part of their pull that is old enough to certify
+    (load/coverage.py: SYNC_LAG_DAYS). Usually that is nothing; it matters for a long pull (new usr, or after an outage).
+
+    Bookkeeping only, so it is deliberately non-fatal: if this fails, those days simply look like gaps and backfill pulls them
+    again (upserts make that harmless). It must never turn a run whose data loaded fine into a failed run.
+    """
+    try:
+        conn = connect_db()
+    except Exception as e:
+        log.warning(f"coverage not recorded (no DB connection): {e}")
+        return
+    try:
+        for type_, per_usr in raw.items():
+            for usr_id, entry in per_usr.items():
+                status = statuses.get((type_, usr_id))
+                ingest_id = ingest_ids.get((type_, usr_id))
+                window = entry.get("window")
+                if status not in ("success", "partial") or ingest_id is None or window is None:
+                    continue
+                try:
+                    n = record_pull_coverage(conn, type_, usr_id, ingest_id, status, entry["payload"], window[0], window[1])
+                    if n:
+                        log.info(f"coverage: usr {usr_id} [{type_}] {n} span(s) recorded for {window[0]} → {window[1]}")
+                except Exception as e:
+                    conn.rollback()
+                    log.warning(f"coverage not recorded for usr {usr_id} [{type_}]: {e}")
+    finally:
+        conn.close()
+
 
 @retry(
     stop=stop_after_attempt(RETRY_ATTEMPTS),
@@ -155,23 +207,48 @@ def notify_failure(subject: str, message: str) -> None:
 )
 def _run_pipeline_once() -> None:
     """
-    One full pass: extract -> load_raw -> transform -> load_processed.
+    One full pass: extract -> load_raw -> transform -> load_processed -> record coverage.
     Matches the exact sequence already used in load.py's __main__ block.
 
     Wrapped in @retry as a whole rather than retrying individual steps, because a mid-sequence failure 
     (e.g. DB briefly unreachable during load_raw_data) means starting the whole pass over is simplest and safest 
-    -- extract_all_devices() re-pulling is safe (upserts / incremental start dates already handle that), 
+    -- extract_all_usrs() re-pulling is safe (upserts / incremental start dates already handle that), 
     so re-running the full sequence on retry is not wasteful in a way that matters here.
     """
-    raw = extract_all_devices()
-    # skipped: devices whose raw payload failed to even build into a row
+    raw = extract_all_usrs()
+    # skipped: usrs whose raw payload failed to even build into a row
     # (see load.py's validate-before-batch change) -- not raised as an exception, just returned for visibility.
-    ingest_ids, fetched_at, skipped = load_raw_data(raw)
+    ingest_ids, pulled_at, skipped = load_raw_data(raw)
     if skipped:
-        log.warning(f"{len(skipped)} device(s) skipped at raw-ingest: {skipped}")
+        log.warning(f"{len(skipped)} usr(s) skipped at raw-ingest: {skipped}")
 
-    transformed = transform_device_data(raw)
-    load_processed_data(transformed, ingest_ids, fetched_at)
+    transformed = transform_usr_data(raw)
+    statuses = load_processed_data(transformed, ingest_ids, pulled_at)
+    _record_daily_coverage(raw, ingest_ids, statuses)
+
+
+def _run_backfill_step() -> None:
+    """
+    Pulls what is uncovered and old enough (see module docstring), at most BACKFILL_MAX_JOBS jobs.
+    Runs AFTER the daily pull so a slow backfill can never delay today's data, and has its own try/except: a backfill problem
+    must not turn a successful daily pull into a failed run. Per-job failures are already in raw.pipeline / the log
+    (and run_backfill stops hammering a usr after 3 failed jobs in a row), so only a run-level exception alerts.
+    No @retry: it is resumable, tomorrow's run continues where this one stopped.
+    """
+    if BACKFILL_MAX_JOBS <= 0:
+        return
+    try:
+        summary = run_backfill(max_jobs=BACKFILL_MAX_JOBS, ingest_method="api_auto")
+        if summary["failed"] or summary["partial"]:
+            log.warning(f"backfill step: {summary} -- see raw.pipeline for the usrs involved")
+        else:
+            log.info(f"backfill step: {summary}")
+    except Exception as e:
+        log.exception("Backfill step FAILED")
+        notify_failure(
+            subject="MultiDevice Datakit: backfill step failed",
+            message=f"The daily pull itself succeeded. Backfill raised: {e}",
+        )
 
 
 def run_daily_pipeline() -> None:
@@ -191,10 +268,9 @@ def run_daily_pipeline() -> None:
 
     try:
         _run_pipeline_once()
-        log.info("=== Daily pipeline run completed successfully ===")
     except Exception as e:
         # Reaching here means retries were exhausted (or a non-retryable  exception occurred) 
-        # -- this is a RUN-LEVEL failure, distinct from any single device's failure 
+        # -- this is a RUN-LEVEL failure, distinct from any single usr's failure 
         # (those are already isolated/logged deeper in the pipeline and don't reach this except block).
         log.exception("Daily pipeline run FAILED after retries")
         notify_failure(
@@ -202,8 +278,14 @@ def run_daily_pipeline() -> None:
             message=f"Run started {started_at.isoformat()} failed: {e}",
         )
         # Not re-raised -- see docstring. 
-        # Tomorrow's scheduled run will attempt again; today's data can be backfilled manually if needed
-        # (extract.py's incremental start_date logic handles re-pulls safely).
+        # Tomorrow's scheduled run will attempt again; the days it covers are re-pulled from each usr's last success, 
+        # and anything older is picked up by the backfill step. The backfill step is skipped today: whatever made the
+        # daily pull fail (DB, network) would most likely fail it too.
+        return
+
+    log.info("=== Daily pull completed successfully ===")
+    _run_backfill_step()
+    log.info("=== Daily pipeline run finished ===")
 
 
 # ============================================================================================================

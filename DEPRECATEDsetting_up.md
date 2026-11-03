@@ -1,10 +1,10 @@
-# Setting Up
+# Setting Up: Step-by-step Guide (ᵔ.ᵔ)ノ
 
-This is a step-by-step walkthrough of everythin to do after cloning the repo and installing the environment (see the main [README](./README.md) for `conda env create` / `.env` steps): stand up the database, onboard the devices, seed the study registry, and backfill any pre-existing CSV data. 
+Everything to do after cloning the repo and installing the environment (see the main [README](./README.md) for `conda env create` / `.env` steps): stand up the database, onboard the devices, seed the study registry, and backfill any pre-existing device readings (data). 
 
 >NOTE: This MUST be done in this order -- onboarding needs devices declared in `config/study_registry.yml`, seeding needs the DB up, and backfilling needs the registry already seeded.
 
-All commands below assume you're at the repo root (terminal command: `cd ..`) with the `multidevice_dataviz` conda env active, and that `deploy/.env` is already filled in (DB creds, Fitbit/Atmotube secrets, etc.) per the README's step 3.
+All commands below assume you're at the repo root (terminal command: `cd ..`) with the `multidevice_dataviz` conda env active, and that `deploy/.env` is already filled in (DB creds, API secrets, etc.) per the README's step 3.
 
 ---
 
@@ -24,16 +24,14 @@ This starts two services (`deploy/docker-compose.yml`):
 
   | File | Creates |
   |---|---|
-  | `00_extensions.sql` | `timescaledb`, `postgis`, `btree_gist` extensions |
-  | `01_schemas.sql` | `registry`, `raw`, `readings`, `accounts` schemas |
+  | `00_extensions.sql` | `timescaledb`, `postgis`, `btree_gist` |
+  | `01_schemas.sql` | `registry`, `raw`, `readings`, `accounts` |
   | `02_registry.sql` | `registry.type` / `site` / `dvc` / `ppt` / `acc` / `usr` (+ views) |
   | `03_raw.sql` | `raw.ingests`, `raw.pipeline`, `raw.pull_coverage` |
   | `04_readings.sql` | `readings.atmotube2` / `fitbit6` (hypertables), `fitbit6_ecg` / `_exercise` / `_sleep` / `_days` (+ dashboard views) |
   | `05_accounts.sql` | `accounts.usr` |
 
   Order matters: each file only references objects created by earlier ones (schemas → `registry.usr` → `raw.*` → `readings.*` / `accounts.*`, which FK to both).
-
-- **`app_grafana`** -- dashboard UI on port `300`, depends on `postgres`.
 
 Sanity check it came up clean:
 
