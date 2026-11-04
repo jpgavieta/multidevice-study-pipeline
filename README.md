@@ -4,8 +4,8 @@
 > This is an evolving research data pipeline, not a finished product. 
 > Structure and scope are actively changing as new devices and features come online.
 
-A Python-based, portable, and customizable pipeline for pulling, standardizing, and storing multi-device research data -- combining an
-**API scheduler**, an **ETL pipeline**, and a **database deployer** into one lightweight data warehouse.
+A fully Python-based, lightweight, and YAML-defined pipeline for pulling, standardizing, and storing multi-device research data -- combining an
+**API scheduler**, an **ETL pipeline**, and a **database deployer** into one self-hostable data warehouse.
 
 Built for a multi-site study tracking environmental exposure (Atmotube air quality sensors) and biometric data (Fitbit / Google Health) across rotating device assignments and multiple participants -- to add a new device type, it must have its own API and parser.
 
@@ -22,7 +22,7 @@ Built specifically for a small-scale research (sole maintainer, some dozen devic
 
 
 ---
-## Flow of Data (ELTL)
+## Flow of Data
 
 `extract_all_usrs()` → `load_raw_data()` → `transform_usr_data()` → `load_processed_data()`
 
@@ -33,7 +33,10 @@ Built specifically for a small-scale research (sole maintainer, some dozen devic
 
 Each run logs a row per usr to `raw.pipeline` (via `general/pipeline_logger.py`), so failures show up in the database instead of only in stdout. `load.py` runs the full sequence when invoked directly. In production, `src/main.py` runs it on a schedule.
 
-<iframe allowfullscreen width="560" height="315" src="https://dbdocs.io/embed/187112b888433d4bef3c317f7eaa3199/64acdab7217841d39be0b124287e0977"></iframe>
+![ETL Pipeline](multidevice_study_pipeline.png)
+
+[View the DB's ERD and documentation](https://dbdocs.io/embed/187112b888433d4bef3c317f7eaa3199/80399c5036af4c629cc7b52772ef521c)
+
 
 ## How to dev setup (fresh machine / new teammate):
 
