@@ -2,12 +2,11 @@
 
 > 🚧 Work in progress !
 > This is an evolving research data pipeline, not a finished product. 
-> Structure and scope are actively changing as new devices and features come online.
 
 A fully Python-based, lightweight, and YAML-defined pipeline for pulling, standardizing, and storing multi-device research data -- combining an
 **API scheduler**, an **ETL pipeline**, and a **database deployer** into one self-hostable data warehouse.
 
-Built for a multi-site study tracking environmental exposure (Atmotube air quality sensors) and biometric data (Fitbit / Google Health) across rotating device assignments and multiple participants -- to add a new device type, it must have its own API and parser.
+This version is built for a multi-site study tracking environmental exposure (Atmotube air quality sensors) and biometric data (Fitbit / Google Health) across rotating device assignments and multiple participants -- to add a new device type, it must have its own API and parser.
 
 1. **What does this project do?**
 
@@ -18,8 +17,7 @@ Built for a multi-site study tracking environmental exposure (Atmotube air quali
 
 2. **Why does this exists?**
 
-Built specifically for a small-scale research (sole maintainer, some dozen devices). It delivers the smallest, most maintainable system that ensures reproducibility and allows easy extension to new device types without modifying core logic.
-
+This repo pulls Fitbit (Google Health API) and Atmotube data into a self-hosted PostgreSQL/TimescaleDB server light enough for modest hardware, so a community-run study keeps control of its own data. Everything is keyed on participant–device–account daterange windows, so shared or reassigned devices never mix participants’ data.
 
 ---
 ## Flow of Data
@@ -51,7 +49,7 @@ cd multidevice-study-pipeline
 conda env create -f environment.yml
 conda activate multidevice_dataviz
 ```
-
+flo
 3. **Set up local secrets**
 cp .env.example .env
 # → fill in .env with real DB creds, Fitbit/Atmotube client secrets, Slack bot token, etc.
