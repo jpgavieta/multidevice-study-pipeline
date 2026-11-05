@@ -1,0 +1,14 @@
+{
+  "dbml": {
+    "entry": "db_schema.dbml"
+  },
+  "diagram": {
+    "id": "",
+    "workspaceId": ""
+  },
+  "document": {
+    "source": "file",
+    "workspaceUrlName": "",
+    "projectUrlName": "j-4/Multidevice-Study-DB"
+  }
+}

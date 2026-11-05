@@ -41,9 +41,9 @@ CLIENT_REGISTRY = {  # keyed by registry.usr.type
 # so TOTAL concurrent requests = this number * the per-client workers. Lower it if rate limits start to bite.
 MAX_PARALLEL_USRS = 12
 
-# Must match raw.ingests.ingest_method's CHECK constraint (deploy/postgres/init/03_raw.sql).
-# 'csv_manual' is never produced here (go to src/extract/scripts/add_csv_atmotube2.py.)
-VALID_INGEST_METHODS = {"api_auto", "api_manual", "csv_manual"}
+# Must match raw.ingests.ingest_kind's CHECK constraint (deploy/postgres/init/03_raw.sql).
+# 'csv_backfill' is never produced here (go to src/extract/scripts/add_csv_atmotube2.py.)
+VALID_INGEST_METHODS = {"api_forwardfill", "api_backfill", "csv_backfill"}
 
 # A scheduled run should only ever cover a day or two.
 # Anything longer (a brand-new usr falling back to its window start, or a long outage) is a historical load: every page of every data type, held in memory.
@@ -126,13 +126,13 @@ def _pull_one_usr(client_usr: dict, start_date: str, end_date: str):
 
 
 def extract_all_usrs(config_path="config/study_registry.yml", end_date=None,
-                    max_workers=MAX_PARALLEL_USRS, ingest_method="api_auto") -> dict[str, dict[int, dict]]:
+                    max_workers=MAX_PARALLEL_USRS, ingest_kind="api_forwardfill") -> dict[str, dict[int, dict]]:
     """
-    Returns { type: { usr_id: {"payload", "ingest_method", "window"} } }, where window = (start, end_inclusive) as dates.
+    Returns { type: { usr_id: {"payload", "ingest_kind", "window"} } }, where window = (start, end_inclusive) as dates.
     A usr that failed or had nothing to pull has no entry.
     """
-    if ingest_method not in VALID_INGEST_METHODS:
-        raise ValueError(f"Invalid ingest_method={ingest_method!r}; must be one of {VALID_INGEST_METHODS}")
+    if ingest_kind not in VALID_INGEST_METHODS:
+        raise ValueError(f"Invalid ingest_kind={ingest_kind!r}; must be one of {VALID_INGEST_METHODS}")
 
     config = load_registry(config_path)
     end_date_obj = date.fromisoformat(end_date) if end_date else datetime.now(timezone.utc).date()
@@ -188,7 +188,7 @@ def extract_all_usrs(config_path="config/study_registry.yml", end_date=None,
 
             all_data.setdefault(type_, {})[usr_id] = {
                 "payload": payload,
-                "ingest_method": ingest_method,
+                "ingest_kind": ingest_kind,
                 "window": windows[usr_id],
             }
             safe_print(f"   ✅ Pulled usr {usr_id} [{type_}]")

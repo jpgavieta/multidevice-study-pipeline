@@ -1,0 +1,430 @@
+// multidevice-study-pipeline: DBML for dbdiagram.io
+// Source: deploy/postgres/init/02_registry.sql ... 05_accounts.sql
+// Views and the raw.pull_gaps() function are not modeled.
+
+Project "multidevice_study_pipeline" {
+  database_type: 'PostgreSQL'
+  note: '''
+    
+      Postgres + PostGIS + TimescaleDB store for a study conducted with multiple device types, for multiple participant sites, and rotating device assignments over time.
+    
+      ## Schemas
+      - **registry**: the study design. Participants (`ppt`), devices (`dvc`), accounts (`acc`), sites and device types, synced from `study_registry.yml`. `registry.usr` links one participant, one device and one account over a date window, and constraints prevent overlapping windows per device and per account.
+      - **raw**: append-only pipeline records. `ingests` holds each raw API payload as JSONB, `pipeline` logs the status of each run, and `pull_coverage` records which date ranges have been fully pulled, so backfills only fetch the gaps.
+      - **readings**: processed data, with typed columns, standardized units and UTC timestamps. Every device type requires a TimescaleDB hypertable for longitudinal visualization (e.g., `readings.atmotube2`, `readings.fitbit6`). If a device type has heterogeneous data, it may require additional tables to fit it into a longitudinal table (e.g., `readings.fitbit6_*`)
+      - **accounts**: optional snapshots of account data from a device with an account (e.g. Fitbit profile data).
+    
+      ## Conventions
+      - `usr_id` identifies an *assignment* (participant + device + account over time), not a person. A participant who switches devices gets a new `usr` row, so join through `registry.usr.ppt_id` to combine their data.
+      - Every processed row carries an `ingest_id` pointing back to the raw payload it came from.
+      - Readings are upserted on their unique key (`usr_id` + time), so re-pulling an overlapping date range is safe.
+      - Timestamps are `timestamptz` in UTC. Column suffixes give the unit (`_bpm`, `_pct`, `_mm`, `_kcal`).
+    
+      ## Data flow
+      `extract`: `raw.ingests` → `transform`: `readings.*`; while `raw.pipeline` logging each run and `raw.pull_coverage` recording what was pulled.
+    
+      Views and indexes function are not shown here.
+  '''
+}
+
+
+
+// ---------------------------------------------------------------------------
+// registry: data ABOUT devices and participants (synced from study_registry.yml)
+// ---------------------------------------------------------------------------
+
+Table registry.type {
+  id text [pk]
+}
+
+Table registry.site {
+  id text [pk]
+}
+
+Table registry.dvc {
+  id text [pk]
+  type text [not null]
+  started_at date [not null]
+  ended_at date
+  notes text
+  last_updated timestamptz [not null, default: `now()`]
+
+  indexes {
+    (id, type) [unique]
+  }
+}
+
+Table registry.ppt {
+  id text [pk]
+  site text [not null]
+  started_at date [not null]
+  ended_at date
+  notes text
+  last_updated timestamptz [not null, default: `now()`]
+
+  indexes {
+    (id, site) [unique]
+  }
+}
+
+Table registry.acc {
+  id text [pk]
+  type text [not null]
+  last_updated timestamptz [not null, default: `now()`]
+
+  indexes {
+    (id, type) [unique]
+  }
+}
+
+Table registry.usr {
+  id bigint [pk, increment]
+  ppt_id text [not null]
+  dvc_id text [not null]
+  acc_id text [not null]
+  type text [not null, note: 'same type on device and account/access']
+  site text [not null, note: 'same site as the participant']
+  started_at date [not null]
+  ended_at date
+  last_updated timestamptz [not null, default: `now()`]
+
+  indexes {
+    (id, type) [unique]
+  }
+  Note: 'CENTRAL. participant + device + account/access over a time window = user. EXCLUDE constraints prevent overlapping windows per device and per account.'
+}
+// ---------------------------------------------------------------------------
+// raw: append-only pipeline metadata and raw payloads
+// ---------------------------------------------------------------------------
+
+Table raw.ingests {
+  id bigint [pk, increment]
+  usr_id bigint [not null]
+  type text [not null]
+  ingest_method text [not null, note: '''
+    api_forwardfill | api_backfill | csv_backfill | test
+  ''']
+  pulled_at timestamptz [not null, default: `now()`]
+  payload jsonb [not null]
+
+  indexes {
+    (usr_id, pulled_at) [name: 'idx_ingests']
+  }
+  Note: 'To backup the raw data'
+}
+
+Table raw.pipeline {
+  id bigint [pk, increment]
+  usr_id bigint [not null]
+  type text [not null]
+  status text [not null, default: 'running', note: 'running | success | partial | failed']
+  started_at timestamptz [not null, default: `now()`]
+  ended_at timestamptz
+  error_message text
+
+  indexes {
+    (usr_id, started_at) [name: 'idx_pipeline']
+  }
+  Note: 'To monitor the pipeline runs'
+}
+
+Table raw.pull_coverage {
+  id bigint [pk, increment]
+  usr_id bigint [not null]
+  type text [not null]
+  data_type text [not null, note: 'endpoint name from the type registry']
+  covered tstzrange [not null, note: '[start, end) in UTC that the pull fully scanned']
+  status text [not null, note: 'success | partial | failed']
+  rows_loaded integer [not null]
+  pages integer
+  ingest_id bigint [not null]
+  pulled_at timestamptz [not null, default: `now()`]
+
+  indexes {
+    (usr_id, data_type) [name: 'idx_pull_coverage']
+  }
+  Note: 'To track time gaps in the data'
+}
+
+// ---------------------------------------------------------------------------
+// readings: processed device data
+// ---------------------------------------------------------------------------
+
+Table readings.atmotube2 {
+  usr_id bigint [not null]
+  recorded_at timestamptz [not null]
+  aqs integer
+  pm1 double
+  pm25 double
+  pm10 double
+  pm_size double
+  pm05_num integer
+  pm1_num integer
+  pm10_num integer
+  pm25_num integer
+  temperature double
+  humidity double
+  pressure double
+  voc double
+  voc_index integer
+  nox_index integer
+  co2 double
+  battery integer
+  charging boolean
+  recently_charged boolean
+  motion boolean
+  altitude double
+  position_error double
+  satellites_fixed integer
+  satellites_in_view integer
+  location geometry [note: 'GEOMETRY(Point, 4326), calculated from longitude and latitude']
+  interpolated_cols "text[]"
+  ingest_id bigint [not null]
+
+  indexes {
+    (usr_id, recorded_at) [unique]
+  }
+
+  Note: 'TimescaleDB hypertable. partition: recorded_at, segmentby: usr_id. Creates location geometry from longitude + latitude'
+}
+
+Table readings.fitbit6_ecg {
+  id bigint [pk, increment]
+  usr_id bigint [not null]
+  started_at timestamptz [not null]
+  ended_at timestamptz [not null]
+  result_type text
+  hr_avg_bpm integer
+  sampling_hz integer
+  millivolts_scf integer
+  lead_num integer
+  waveform_data "text[]"
+  ingest_id bigint [not null]
+
+  indexes {
+    (usr_id, started_at, ended_at) [unique]
+    (usr_id, started_at) [name: 'idx_fitbit6_ecg_usr_time']
+  }
+}
+
+Table readings.fitbit6_exercise {
+  id bigint [pk, increment]
+  usr_id bigint [not null]
+  started_at timestamptz [not null]
+  ended_at timestamptz [not null]
+  result_type text
+  method text [note: 'PASSIVELY_MEASURED | ACTIVELY_MEASURED']
+  calories_kcal double
+  hr_avg_bpm integer
+  hr_zone_light_sec integer
+  hr_zone_moderate_sec integer
+  hr_zone_vigorous_sec integer
+  hr_zone_peak_sec integer
+  exercise_events jsonb
+  metadata jsonb
+  ingest_id bigint [not null]
+
+  indexes {
+    (usr_id, started_at, ended_at) [unique]
+    (usr_id, started_at) [name: 'idx_fitbit6_exercise_usr_time']
+  }
+}
+
+Table readings.fitbit6_sleep {
+  id bigint [pk, increment]
+  usr_id bigint [not null]
+  started_at timestamptz [not null]
+  ended_at timestamptz [not null]
+  result_type text [note: 'STAGES | CLASSIC | UNSPECIFIED']
+  nap boolean
+  sleep_stages_data jsonb
+  sleep_sum_data jsonb
+  sum_insleep_mins integer
+  sum_towakeup_mins integer
+  sum_tosleep_mins integer
+  sum_asleep_mins integer
+  sum_awake_mins integer
+  metadata jsonb
+  rr_sample_end timestamptz
+  rr_deep_pm double
+  rr_deep_stddev double
+  rr_deep_snr double
+  rr_light_pm double
+  rr_light_stddev double
+  rr_light_snr double
+  rr_rem_pm double
+  rr_rem_stddev double
+  rr_rem_snr double
+  rr_full_pm double
+  rr_full_stddev double
+  rr_full_snr double
+  ingest_id bigint [not null]
+
+  indexes {
+    (usr_id, started_at, ended_at) [unique]
+    (usr_id, started_at) [name: 'idx_fitbit6_sleep_usr_time']
+  }
+
+  Note: 'Combines sleep + respiratory-rate-sleep-summary'
+}
+
+Table readings.fitbit6_days {
+  id bigint [pk, increment]
+  usr_id bigint [not null]
+  started_at date [not null]
+  ended_at date [not null, note: 'exclusive: started_at + 1 day']
+  hr_resting_bpm integer
+  hr_resting_method text
+  hr_nonrem_bpm integer
+  hrv_avgsleep_rmssdms double
+  hrv_avgsleep_entropy double
+  hrv_deepsleep_rmssdms double
+  spo2_avg_pct double
+  spo2_min_pct double
+  spo2_max_pct double
+  spo2_stddev_pct double
+  rr_pm double
+  hr_zone_light_min integer
+  hr_zone_light_max integer
+  hr_zone_moderate_min integer
+  hr_zone_moderate_max integer
+  hr_zone_vigorous_min integer
+  hr_zone_vigorous_max integer
+  hr_zone_peak_min integer
+  hr_zone_peak_max integer
+  hr_zones_kcal_data jsonb
+  sleep_temp_avg_c double
+  sleep_temp_baseline_c double
+  sleep_temp_rstddev_c double
+  vo2_max_data jsonb
+  floors_num integer
+  ingest_id bigint [not null]
+
+  indexes {
+    (usr_id, started_at) [unique]
+  }
+
+  Note: 'Daily (24-hr aggregated)'
+}
+
+Table readings.fitbit6 {
+  usr_id bigint [not null]
+  recorded_at timestamptz [not null]
+  hr_bpm integer
+  hrv_rmssdms double
+  spo2_pct double
+  steps_num integer
+  distance_mm double
+  hr_zone_desc text
+  hr_zone_type text
+  activity_level text
+  activity_kcal double
+  ecg_id bigint
+  exercise_id bigint
+  sleep_id bigint
+  irn boolean
+  sedentary boolean
+  altitude_mm double
+  bodyfat_pct double
+  weight_g double
+  height_mm integer
+  body_temp_data jsonb
+  bld_glucose_data jsonb
+  interpolated_cols "text[]"
+  ingest_id bigint [not null]
+
+  indexes {
+    (usr_id, recorded_at) [unique]
+  }
+
+  Note: 'TimescaleDB hypertable. partition: recorded_at, segmentby: usr_id. Combines continious + interval + session data'
+}
+
+// ---------------------------------------------------------------------------
+// accounts: append-only attribute snapshots
+// ---------------------------------------------------------------------------
+
+Table accounts.usr {
+  id bigint [pk, increment]
+  usr_id bigint [not null]
+  recorded_at timestamptz [not null]
+  attrs jsonb [not null, note: "e.g. fitbit profile data"]
+  ingest_id bigint
+
+  indexes {
+    (usr_id, recorded_at) [unique]
+  }
+
+  Note: 'Optional. account data from the device'
+}
+
+// ---------------------------------------------------------------------------
+// Relationships
+// ---------------------------------------------------------------------------
+
+Ref: registry.dvc.type > registry.type.id
+Ref: registry.acc.type > registry.type.id
+Ref: registry.ppt.site > registry.site.id
+
+Ref: registry.usr.(ppt_id, site) > registry.ppt.(id, site)
+Ref: registry.usr.(dvc_id, type) > registry.dvc.(id, type)
+Ref: registry.usr.(acc_id, type) > registry.acc.(id, type)
+
+Ref: raw.ingests.(usr_id, type) > registry.usr.(id, type)
+Ref: raw.pipeline.(usr_id, type) > registry.usr.(id, type)
+Ref: raw.pull_coverage.(usr_id, type) > registry.usr.(id, type)
+Ref: raw.pull_coverage.ingest_id > raw.ingests.id
+
+Ref: readings.atmotube2.usr_id > registry.usr.id
+Ref: readings.atmotube2.ingest_id > raw.ingests.id
+
+Ref: readings.fitbit6_ecg.usr_id ?> registry.usr.id
+Ref: readings.fitbit6_ecg.ingest_id ?> raw.ingests.id
+Ref: readings.fitbit6_exercise.usr_id ?> registry.usr.id
+Ref: readings.fitbit6_exercise.ingest_id ?> raw.ingests.id
+Ref: readings.fitbit6_sleep.usr_id ?> registry.usr.id
+Ref: readings.fitbit6_sleep.ingest_id ?> raw.ingests.id
+Ref: readings.fitbit6_days.usr_id ?> registry.usr.id
+Ref: readings.fitbit6_days.ingest_id ?> raw.ingests.id
+
+Ref: readings.fitbit6.usr_id > registry.usr.id
+Ref: readings.fitbit6.ingest_id > raw.ingests.id
+Ref: readings.fitbit6.ecg_id > readings.fitbit6_ecg.id
+Ref: readings.fitbit6.exercise_id > readings.fitbit6_exercise.id
+Ref: readings.fitbit6.sleep_id > readings.fitbit6_sleep.id
+
+Ref: accounts.usr.usr_id ?> registry.usr.id
+Ref: accounts.usr.ingest_id ?> raw.ingests.id
+
+// ---------------------------------------------------------------------------
+// Groups (one per schema)
+// ---------------------------------------------------------------------------
+
+TableGroup registry {
+  registry.type
+  registry.site
+  registry.dvc
+  registry.ppt
+  registry.acc
+  registry.usr
+}
+
+TableGroup raw {
+  raw.ingests
+  raw.pipeline
+  raw.pull_coverage
+}
+
+TableGroup readings {
+  readings.atmotube2
+  readings.fitbit6
+  readings.fitbit6_ecg
+  readings.fitbit6_exercise
+  readings.fitbit6_sleep
+  readings.fitbit6_days
+}
+
+TableGroup accounts {
+  accounts.usr
+}
+

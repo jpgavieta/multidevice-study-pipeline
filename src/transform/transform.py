@@ -20,7 +20,7 @@ PARSER_REGISTRY = {
 
 def transform_usr_data(raw_data: dict[str, dict[int, dict]]) -> dict[str, dict[int, dict]]:
     """
-    { type: { usr_id: {"payload", "ingest_method", ...} } }
+    { type: { usr_id: {"payload", "ingest_kind", ...} } }
     -> { type: { usr_id: {"data": { table_name: [row, ...] }} } }
     A usr whose parser raised comes back as {"data": {}, "error": str}.
     """

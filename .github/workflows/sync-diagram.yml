@@ -1,0 +1,19 @@
+# .github/workflows/sync-diagram.yml
+name: Sync dbdiagram
+on:
+  push:
+    branches: [main]
+    paths: ['db_docs.dbml']
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm install -g dbdiagram
+      - run: dbdiagram push
+      - run: dbdiagram build document
+        env:
+          DBDIAGRAM_TOKEN: ${{ secrets.DBDIAGRAM_TOKEN }}

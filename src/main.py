@@ -238,7 +238,7 @@ def _run_backfill_step() -> None:
     if BACKFILL_MAX_JOBS <= 0:
         return
     try:
-        summary = run_backfill(max_jobs=BACKFILL_MAX_JOBS, ingest_method="api_auto")
+        summary = run_backfill(max_jobs=BACKFILL_MAX_JOBS, ingest_kind="api_forwardfill")
         if summary["failed"] or summary["partial"]:
             log.warning(f"backfill step: {summary} -- see raw.pipeline for the usrs involved")
         else:

@@ -211,7 +211,7 @@ def plan_jobs(conn, usrs: list[dict], specs: dict[str, TypeSpec], data_type_filt
 # ============================================================================================================
 # running
 
-def _run_job(conn, config: dict, job: dict, spec: TypeSpec, ingest_method: str) -> str:
+def _run_job(conn, config: dict, job: dict, spec: TypeSpec, ingest_kind: str) -> str:
     """Returns 'ok', 'partial' or 'failed'. Never raises for an expected failure; unexpected ones propagate to run_backfill."""
     u, lo, hi = job["usr"], job["lo"], job["hi"]
     usr_id, type_ = u["usr_id"], u["type"]
@@ -223,7 +223,7 @@ def _run_job(conn, config: dict, job: dict, spec: TypeSpec, ingest_method: str) 
         print(f"   ❌ usr {usr_id} {lo}→{hi}: nothing came back ({len(pulled.failed)} failed)")
         return "failed"
 
-    all_data = {type_: {usr_id: {"payload": pulled.payload, "ingest_method": ingest_method}}}
+    all_data = {type_: {usr_id: {"payload": pulled.payload, "ingest_kind": ingest_kind}}}
     ingest_ids, pulled_at, _skipped = load_raw_data(all_data)
     transformed = transform_usr_data(all_data)
     status = load_processed_data(transformed, ingest_ids, pulled_at).get((type_, usr_id), "skipped")
@@ -247,7 +247,7 @@ def run_backfill(usr_ids: Optional[list[int]] = None, type_: Optional[str] = Non
                 data_types: Optional[list[str]] = None, since: Optional[date] = None,
                 chunk_days: Optional[int] = None, sync_lag_days: Optional[int] = None,
                 max_jobs: Optional[int] = None, dry_run: bool = False,
-                ingest_method: str = "api_manual", config_path: str = "config/study_registry.yml") -> dict[str, Any]:
+                ingest_kind: str = "api_backfill", config_path: str = "config/study_registry.yml") -> dict[str, Any]:
     """
     Plans and (unless dry_run) runs the backfill. Returns {"jobs", "ok", "partial", "failed", "skipped"}.
     max_jobs bounds a run (e.g. when called from the daily job); the next run continues where this one stopped.
@@ -287,7 +287,7 @@ def run_backfill(usr_ids: Optional[list[int]] = None, type_: Optional[str] = Non
                 summary["skipped"] += 1
                 continue
             try:
-                result = _run_job(conn, config, j, specs[j["usr"]["type"]], ingest_method)
+                result = _run_job(conn, config, j, specs[j["usr"]["type"]], ingest_kind)
             except Exception as e:
                 result = "failed"
                 msg = f"backfill {j['lo']}→{j['hi']} raised {_describe_error(e)}"

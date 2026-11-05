@@ -339,7 +339,7 @@ def _coverage_entries(recs: list[dict], file_days: list[tuple[date, date]], usr:
 
 
 def _payload(recs: list[dict]) -> dict:
-    """Same keys as atmotube2_client.extract_raw_data(). No MAC, no source flag: raw.ingests.ingest_method says 'csv_manual'."""
+    """Same keys as atmotube2_client.extract_raw_data(). No MAC, no source flag: raw.ingests.ingest_kind says 'csv_backfill'."""
     first, last = recs[0]["date"][:10], recs[-1]["date"][:10]
     return {
         "start_date": first,
@@ -390,7 +390,7 @@ def process_mac(mac: str, files: list[Path], acc_id: str, usrs: list[dict], usr_
 
 def write_to_db(conn, plan: dict[int, dict]) -> None:
     """Loads every planned usr through the live path, then records coverage for the ones that loaded."""
-    all_data = {ATMOTUBE_TYPE: {usr_id: {"payload": p["payload"], "ingest_method": "csv_manual"} for usr_id, p in plan.items()}}
+    all_data = {ATMOTUBE_TYPE: {usr_id: {"payload": p["payload"], "ingest_kind": "csv_backfill"} for usr_id, p in plan.items()}}
     ingest_ids, pulled_at, _skipped = load_raw_data(all_data)
     transformed = transform_usr_data(all_data)
     statuses = load_processed_data(transformed, ingest_ids, pulled_at)

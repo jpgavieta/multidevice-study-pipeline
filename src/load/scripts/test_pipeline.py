@@ -48,8 +48,8 @@ from load.load import (
     _get_window, _filter_window,
 )
 
-# Must match raw.ingests.ingest_method's CHECK constraint (see extract.VALID_INGEST_METHODS); "test" would be rejected.
-TEST_INGEST_METHOD = "api_manual"
+# Must match raw.ingests.ingest_kind's CHECK constraint (see extract.VALID_INGEST_METHODS); "test" would be rejected.
+TEST_INGEST_METHOD = "api_backfill"
 
 CAPTURE_RE = re.compile(r"^(?P<ppt_id>ppt_\d+)_(?P<acc_id>.+)_test\.json$")
 
@@ -217,7 +217,7 @@ def _load_stage(usr_type: str, usr_id: int, capture: Path, rerun: bool) -> bool:
     parsed = PARSER_REGISTRY[usr_type].parse(raw_data, usr_id)
     print(f"   Parsed: { {k: (1 if k == 'profile' else len(v)) for k, v in parsed.items()} }")
 
-    all_data = {usr_type: {usr_id: {"payload": raw_data, "ingest_method": TEST_INGEST_METHOD}}}
+    all_data = {usr_type: {usr_id: {"payload": raw_data, "ingest_kind": TEST_INGEST_METHOD}}}
     ingest_ids, fetched_at, _ = load_raw_data(all_data)
     if (usr_type, usr_id) not in ingest_ids:
         print("   ❌ load_raw_data() did not return an ingest_id for this usr")

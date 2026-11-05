@@ -100,8 +100,8 @@ def _build_location(latitude, longitude) -> str | None:
 def load_raw_data(all_data: dict[str, dict[int, dict]]) -> tuple[dict[tuple[str, int], int], datetime, list[str]]:
     """
     Pushes raw API payloads into raw.ingests, one row per usr_id per pull.
-    all_data: { type: { usr_id: {"payload", "ingest_method", ...} } }  -- extract.extract_all_usrs() output
-    (CSV backfills use the same shape with ingest_method="csv_manual").
+    all_data: { type: { usr_id: {"payload", "ingest_kind", ...} } }  -- extract.extract_all_usrs() output
+    (CSV backfills use the same shape with ingest_kind="csv_backfill").
 
     Returns
     -------
@@ -118,7 +118,7 @@ def load_raw_data(all_data: dict[str, dict[int, dict]]) -> tuple[dict[tuple[str,
         for usr_id, entry in per_usr.items():
             try:
                 payload_json = json.dumps(entry["payload"])
-                row = (usr_id, type_, entry["ingest_method"], pulled_at, payload_json)
+                row = (usr_id, type_, entry["ingest_kind"], pulled_at, payload_json)
             except Exception as e:
                 msg = f"{type_}/usr {usr_id}: failed to build raw row ({e})"
                 print(f"   ⚠️ {msg} — skipped")
@@ -136,7 +136,7 @@ def load_raw_data(all_data: dict[str, dict[int, dict]]) -> tuple[dict[tuple[str,
         with conn.cursor() as cur:
             returned = execute_values(
                 cur,
-                "INSERT INTO raw.ingests (usr_id, type, ingest_method, pulled_at, payload) VALUES %s RETURNING id",
+                "INSERT INTO raw.ingests (usr_id, type, ingest_kind, pulled_at, payload) VALUES %s RETURNING id",
                 rows,
                 template="(%s, %s, %s, %s, %s::jsonb)",
                 fetch=True,

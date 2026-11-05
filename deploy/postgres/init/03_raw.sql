@@ -7,11 +7,11 @@ CREATE TABLE IF NOT EXISTS raw.ingests (
     id              BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     usr_id          BIGINT NOT NULL,       -- participant + device + account/access + window
     type            TEXT   NOT NULL,       -- e.g. 'fitbit6', 'atmotube2'
-    ingest_method   TEXT NOT NULL
-                    CHECK (ingest_method IN (
-                        'api_auto',
-                        'api_manual',
-                        'csv_manual',
+    ingest_kind   TEXT NOT NULL
+                    CHECK (ingest_kind IN (
+                        'api_forwardfill',
+                        'api_backfill',
+                        'csv_backfill',
                         'test'
                     )),
     pulled_at       TIMESTAMPTZ NOT NULL DEFAULT now(),

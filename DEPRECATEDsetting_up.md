@@ -193,7 +193,7 @@ PYTHONPATH=src python -m extract.scripts.backfill_atmotube --out /tmp/atmotube_b
 
 ### After backfilling
 
-Backfilled rows land in `raw.ingests` with `ingest_method = 'csv_manual'` and a `"source": "csv_backfill"` marker inside the payload (useful for later auditing, distinguishing them from live pulls without relying on timestamp clustering). They still need to go through the normal transform step to land in `atmotube.readings` -- run the pipeline's transform/load step (`python -m load.load` or the relevant slice of `src/main.py`'s daily job) same as you would for a live pull.
+Backfilled rows land in `raw.ingests` with `ingest_kind = 'csv_backfill'` and a `"source": "csv_backfill"` marker inside the payload (useful for later auditing, distinguishing them from live pulls without relying on timestamp clustering). They still need to go through the normal transform step to land in `atmotube.readings` -- run the pipeline's transform/load step (`python -m load.load` or the relevant slice of `src/main.py`'s daily job) same as you would for a live pull.
 
 Fields the CSV export doesn't include (`pm05_num`, `pm1_num`, `pm10_num`, `pm25_num`, `pm_size`, satellite/SNR fields) are legitimately `null` on backfilled rows -- not a bug.
 
