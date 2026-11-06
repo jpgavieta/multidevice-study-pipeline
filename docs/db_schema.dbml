@@ -27,11 +27,6 @@ Project "multidevice_study_pipeline" {
       - Credentials are read from the yml in memory and are never written to the database.
       - The sync is run manually. The scheduled daily job does not call it.
 
-      ## Data flow
-      Registry sync (manual): `study_registry.yml` → `registry.*`.
-
-      Daily pipeline: `extract` → `raw.ingests` → `transform` → `readings.*` / `accounts.usr`. `raw.pipeline` logs each usr's load (running, then success, partial or failed). `raw.pull_coverage` is written after a successful load by the backfill and CSV-loader scripts (the daily job does not record coverage yet).
-
       Views and indexes are not shown here.
   '''
 }
