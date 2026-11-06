@@ -174,41 +174,99 @@ Table raw.pull_coverage {
 // ---------------------------------------------------------------------------
 
 Table readings.atmotube2 {
-  usr_id bigint [not null]
-  recorded_at timestamptz [not null]
-  aqs integer
-  pm1 double
-  pm25 double
-  pm10 double
-  pm_size double
-  pm05_num integer
-  pm1_num integer
-  pm10_num integer
-  pm25_num integer
-  temperature double
-  humidity double
-  pressure double
-  voc double
-  voc_index integer
-  nox_index integer
-  co2 double
-  battery integer
-  charging boolean
-  recently_charged boolean
-  motion boolean
-  altitude double
-  position_error double
-  satellites_fixed integer
-  satellites_in_view integer
-  location geometry [note: 'GEOMETRY(Point, 4326), calculated from longitude and latitude']
-  interpolated_cols "text[]"
-  ingest_id bigint [not null]
+  usr_id bigint [not null, note: 'Assignment (participant + device + account), not a person. Join via registry.usr.ppt_id to combine a participant\'s data.']
+  recorded_at timestamptz [not null, note: '''
+    Datasheet: `datetime`. ISO 8601, UTC-aware. Standardized timestamp and the key used to merge all parser category tables.
+  ''']
+  aqs integer [note: '''
+    Datasheet: `aqs_total`. Unit: score 0-100 (integer), 0 = polluted, 100 = clean.
+    Aggregate Air Quality Score combining PM, TVOC, CO2 and NOx. Not a weather measurement, even though the parser pulls it alongside weather columns.
+  ''']
+
+  // --- Particulate matter (Sensirion SPS30) ---
+  pm1 double [note: 'Datasheet: `pm1_0_ugm3_atm`. Unit: ug/m3. Mass concentration of particulate matter <= 1.0 um. Sensor: Sensirion SPS30.']
+  pm25 double [note: 'Datasheet: `pm2_5_ugm3_atm`. Unit: ug/m3. Mass concentration of particulate matter <= 2.5 um. Sensor: Sensirion SPS30.']
+  pm10 double [note: 'Datasheet: `pm10_ugm3_atm`. Unit: ug/m3. Mass concentration of particulate matter <= 10 um. Sensor: Sensirion SPS30.']
+
+  // --- PM extension (PRO 2 only) ---
+  pm_size double [note: '''
+    Datasheet: `pmsize_um_avg`. Unit: um. Average particle size, converted from nm (nm / 1000).
+    PRO 2 only. The original nm value (`pmsize_nm_avg`) has no column here.
+  ''']
+  pm05_num integer [note: 'Datasheet: `pm0_5_um_count`. Unit: count per unit volume. Number of particles with diameter beyond 0.5 um. PRO 2 only.']
+  pm1_num integer [note: 'Datasheet: `pm1_0_um_count`. Unit: count. Number of particles with diameter beyond 1.0 um. PRO 2 only.']
+  pm10_num integer [note: 'Datasheet: `pm10_um_count`. Unit: count. Number of particles with diameter beyond 10 um. PRO 2 only.']
+  pm25_num integer [note: 'Datasheet: `pm2_5_um_count`. Unit: count. Number of particles with diameter beyond 2.5 um. PRO 2 only.']
+
+  // --- Weather (Bosch BME280) ---
+  temperature double [note: 'Datasheet: `temp_c`. Unit: degC. Ambient temperature. Sensor: Bosch BME280. Used downstream for heat index and dew point.']
+  humidity double [note: '''
+    Datasheet: `hum_pct`. Unit: %. Relative humidity: water vapor in the air relative to the maximum it can hold at that temperature (0% = dry, 100% = saturated).
+    Sensor: Bosch BME280. Used downstream for heat index and dew point.
+  ''']
+  pressure double [note: '''
+    Datasheet: `press_hpa`. Unit: hPa. Atmospheric pressure at the current elevation (NOT adjusted to sea level).
+    Sensor: Bosch BME280. Used downstream for heat index and dew point.
+  ''']
+
+  // --- Gas (TVOC / NOx / CO2) ---
+  voc double [note: '''
+    Datasheet: `tvoc_ppm`. Unit: ppm. Absolute concentration of Total Volatile Organic Compounds in one volume of air.
+    Sensor: Sensirion SGP41 (PRO 2 only; the original PRO uses the TVOC-only SGPC3).
+  ''']
+  voc_index integer [note: '''
+    Datasheet: `tvoc_index`. Unit: index, 0-500. TVOC score relative to a rolling 24-hour baseline.
+    100 = baseline, >100 = becoming more polluted, <100 = becoming cleaner. Sensor: Sensirion SGP41.
+  ''']
+  nox_index integer [note: '''
+    Datasheet: `nox_index`. Unit: index, 0-500. Score for nitric oxide (NO) and nitrogen dioxide (NO2) relative to a rolling 24-hour baseline (100 = baseline).
+    Sensor: Sensirion SGP41 (the SGP40 has no NOx capability).
+  ''']
+  co2 double [note: 'Datasheet: `co2_ppm`. Unit: ppm. Absolute concentration of carbon dioxide in one volume of air. Sensor: Sensirion SCD41 (separate from the VOC/NOx sensor).']
+
+  // --- Phone state ---
+  battery integer [note: 'Datasheet: `battery_phone_pct`. Unit: %. Remaining battery charge on the phone (not the Atmotube). Source: phone OS.']
+  charging boolean [note: 'Datasheet: `charge_phone_bool`. Whether the phone was actively charging during data collection (raw value `yes`).']
+  recently_charged boolean [note: '''
+    Datasheet: `cooldown_phone_bool`. Whether the phone was in a post-charge cooldown state (raw value `cd`).
+    Kept separate from `charging` because cooldown may still affect phone/sensor performance.
+  ''']
+  motion boolean [note: 'Datasheet: `motion_phone_bool` (renamed from `motion_now_bool`). Whether the device was moving at the time of the reading. Source: phone motion sensors.']
+
+  // --- GIS / location (phone GPS) ---
+  altitude double [note: '''
+    Datasheet: `altitude`. Unit: m. Current elevation, derived from barometric pressure (Bosch BME280).
+    Optional: only present if an altitude-like column is detected in the source export.
+  ''']
+  position_error double [note: '''
+    Datasheet: `position_error_m`. Unit: m. Estimated accuracy of the phone's GPS fix.
+    Reflects the phone's GNSS chip, not the Atmotube. PRO 2 only.
+  ''']
+  satellites_fixed integer [note: '''
+    Datasheet: `sat_used_count` (renamed from `sat_fix_count`). Unit: count. Satellites used to calculate the location fix.
+    Minimum 4 for a 3D fix [lon, lat, alt]; minimum 3 for a 2D fix [lon, lat]. PRO 2 only.
+  ''']
+  satellites_in_view integer [note: 'Datasheet: `sat_view_count`. Unit: count. Number of satellites currently in view. PRO 2 only.']
+  location geometry [note: '''
+    GEOMETRY(Point, 4326), calculated from datasheet `longitude` and `latitude` (degrees; 0 = equator / prime meridian). Source: phone GPS (the Atmotube has no internal GPS module).
+    Data-quality rule: rows with null lat/lon, or exactly (0.0, 0.0) ("null island"), are treated as invalid and carry no location/timezone.
+  ''']
+
+  // --- Pipeline ---
+  interpolated_cols "text[]" [note: 'Pipeline field (not in datasheet). Names of columns whose values in this row were interpolated rather than measured.']
+  ingest_id bigint [not null, note: 'Points back to the raw.ingests payload this row came from.']
 
   indexes {
     (usr_id, recorded_at) [unique]
   }
 
-  Note: 'TimescaleDB hypertable. partition: recorded_at, segmentby: usr_id. Creates location geometry from longitude + latitude'
+  Note: '''
+    TimescaleDB hypertable. partition: recorded_at, segmentby: usr_id. Creates location geometry from longitude + latitude.
+
+    Atmotube PRO 2 data, mapped from the parser output in `src/parsers/atmotube.py` (see Atmotube datasheet). Each column note starts with the datasheet variable name it comes from.
+
+    TODO: variables with NO column in this table: `sat_lowsignal_count`, `sat_medsignal_count`, `sat_highsignal_count`, `sat_signal_avg`, `user_notes`.
+  '''
 }
 
 Table readings.fitbit6_ecg {
