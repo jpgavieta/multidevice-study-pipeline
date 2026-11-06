@@ -1,29 +1,38 @@
 // multidevice-study-pipeline: DBML for dbdiagram.io
 // Source: deploy/postgres/init/02_registry.sql ... 05_accounts.sql
-// Views and the raw.pull_gaps() function are not modeled.
 
 Project "multidevice_study_pipeline" {
   database_type: 'PostgreSQL'
   note: '''
-    
+
       Postgres + PostGIS + TimescaleDB store for a study conducted with multiple device types, for multiple participant sites, and rotating device assignments over time.
-    
+
       ## Schemas
-      - **registry**: the study design. Participants (`ppt`), devices (`dvc`), accounts (`acc`), sites and device types, synced from `study_registry.yml`. `registry.usr` links one participant, one device and one account over a date window, and constraints prevent overlapping windows per device and per account.
-      - **raw**: append-only pipeline records. `ingests` holds each raw API payload as JSONB, `pipeline` logs the status of each run, and `pull_coverage` records which date ranges have been fully pulled, so backfills only fetch the gaps.
+      - **registry**: the study design. Participants (`ppt`), devices (`dvc`), accounts (`acc`), sites and device types, synced from `study_registry.yml`, which is the source of truth. `registry.usr` links one participant, one device and one account over a date window, and constraints prevent overlapping windows per device and per account.
+      - **raw**: pipeline records. `ingests` holds each raw API payload as JSONB (append-only), `pipeline` logs the status of each run (one row per usr per run, updated once when the run ends), and `pull_coverage` records which date ranges have been fully pulled (append-only), so backfills only fetch the gaps.
       - **readings**: processed data, with typed columns, standardized units and UTC timestamps. Every device type requires a TimescaleDB hypertable for longitudinal visualization (e.g., `readings.atmotube2`, `readings.fitbit6`). If a device type has heterogeneous data, it may require additional tables to fit it into a longitudinal table (e.g., `readings.fitbit6_*`)
-      - **accounts**: optional snapshots of account data from a device with an account (e.g. Fitbit profile data).
-    
+      - **accounts**: optional snapshots of account data from a device with an account (e.g. Fitbit profile data). A row is appended only when the data differs from the latest snapshot.
+
       ## Conventions
       - `usr_id` identifies an *assignment* (participant + device + account over time), not a person. A participant who switches devices gets a new `usr` row, so join through `registry.usr.ppt_id` to combine their data.
       - Every processed row carries an `ingest_id` pointing back to the raw payload it came from.
       - Readings are upserted on their unique key (`usr_id` + time), so re-pulling an overlapping date range is safe.
       - Timestamps are `timestamptz` in UTC. Column suffixes give the unit (`_bpm`, `_pct`, `_mm`, `_kcal`).
-    
+
+      ## Registry sync
+      `config/study_registry.yml` is the single source of truth. Running `python -m load.scripts.seed_registry` makes `registry.*` mirror it in one transaction (any error rolls everything back):
+      - New values in the yml are inserted, changed values are updated, and values removed from the yml are deleted (children before parents).
+      - `registry.usr` rows keep their `id` when only dates or accounts change, so readings stay attached to the same usr. A change that would orphan loaded data is refused by the foreign keys.
+      - The yml is validated first. A bad yml (unset env variable, type mismatch, overlapping windows) changes nothing.
+      - Credentials are read from the yml in memory and are never written to the database.
+      - The sync is run manually. The scheduled daily job does not call it.
+
       ## Data flow
-      `extract`: `raw.ingests` → `transform`: `readings.*`; while `raw.pipeline` logging each run and `raw.pull_coverage` recording what was pulled.
-    
-      Views and indexes function are not shown here.
+      Registry sync (manual): `study_registry.yml` → `registry.*`.
+
+      Daily pipeline: `extract` → `raw.ingests` → `transform` → `readings.*` / `accounts.usr`. `raw.pipeline` logs each usr's load (running, then success, partial or failed). `raw.pull_coverage` is written after a successful load by the backfill and CSV-loader scripts (the daily job does not record coverage yet).
+
+      Views and indexes are not shown here.
   '''
 }
 
@@ -35,10 +44,14 @@ Project "multidevice_study_pipeline" {
 
 Table registry.type {
   id text [pk]
+
+  Note: 'Device types from the yml types list. Only an id, so a rename is an insert of the new value and a delete of the old one.'
 }
 
 Table registry.site {
   id text [pk]
+
+  Note: 'Sites from the yml sites list. Only an id, so a rename is an insert of the new value and a delete of the old one.'
 }
 
 Table registry.dvc {
@@ -75,6 +88,8 @@ Table registry.acc {
   indexes {
     (id, type) [unique]
   }
+
+  Note: 'Account data only. No credentials are stored.'
 }
 
 Table registry.usr {
@@ -91,10 +106,14 @@ Table registry.usr {
   indexes {
     (id, type) [unique]
   }
-  Note: 'CENTRAL. participant + device + account/access over a time window = user. EXCLUDE constraints prevent overlapping windows per device and per account.'
+  Note: '''
+    CENTRAL. participant + device + account/access over a time window = user. EXCLUDE constraints prevent overlapping windows per device and per account.
+
+    The foreign keys to dvc and acc (ON UPDATE CASCADE) and the two overlap constraints are DEFERRABLE INITIALLY IMMEDIATE. The registry sync defers them at the start of its transaction, so a device and its account can change type together and the checks run at COMMIT. The key to ppt cascades site changes only.
+  '''
 }
 // ---------------------------------------------------------------------------
-// raw: append-only pipeline metadata and raw payloads
+// raw: pipeline metadata and raw payloads
 // ---------------------------------------------------------------------------
 
 Table raw.ingests {
@@ -110,7 +129,7 @@ Table raw.ingests {
   indexes {
     (usr_id, pulled_at) [name: 'idx_ingests']
   }
-  Note: 'To backup the raw data'
+  Note: 'To backup the raw data. Append-only: one row per usr per pull.'
 }
 
 Table raw.pipeline {
@@ -125,7 +144,7 @@ Table raw.pipeline {
   indexes {
     (usr_id, started_at) [name: 'idx_pipeline']
   }
-  Note: 'To monitor the pipeline runs'
+  Note: 'To monitor the pipeline runs. One row per usr per run: inserted as running when the load starts, then updated once with the final status.'
 }
 
 Table raw.pull_coverage {
@@ -143,7 +162,11 @@ Table raw.pull_coverage {
   indexes {
     (usr_id, data_type) [name: 'idx_pull_coverage']
   }
-  Note: 'To track time gaps in the data'
+  Note: '''
+    To track time gaps in the data. Append-only. Written after a successful load, only for ranges that were scanned to the end. Only success rows count as covered, and raw.pull_gaps() uses them to find the date ranges a backfill still needs to pull.
+
+    Currently written by the backfill and CSV-loader scripts. The daily job does not record coverage yet.
+  '''
 }
 
 // ---------------------------------------------------------------------------
@@ -337,7 +360,7 @@ Table readings.fitbit6 {
     (usr_id, recorded_at) [unique]
   }
 
-  Note: 'TimescaleDB hypertable. partition: recorded_at, segmentby: usr_id. Combines continious + interval + session data'
+  Note: 'TimescaleDB hypertable. partition: recorded_at, segmentby: usr_id. Combines continuous + interval + session data'
 }
 
 // ---------------------------------------------------------------------------
@@ -355,7 +378,7 @@ Table accounts.usr {
     (usr_id, recorded_at) [unique]
   }
 
-  Note: 'Optional. account data from the device'
+  Note: 'Optional. account data from the device. Append-only: a row is added only when attrs differs from the latest snapshot.'
 }
 
 // ---------------------------------------------------------------------------
@@ -366,9 +389,11 @@ Ref: registry.dvc.type > registry.type.id
 Ref: registry.acc.type > registry.type.id
 Ref: registry.ppt.site > registry.site.id
 
-Ref: registry.usr.(ppt_id, site) > registry.ppt.(id, site)
-Ref: registry.usr.(dvc_id, type) > registry.dvc.(id, type)
-Ref: registry.usr.(acc_id, type) > registry.acc.(id, type)
+// Cascade: a site change on ppt, or a type change on dvc / acc, updates the matching usr rows.
+// The dvc and acc keys are also DEFERRABLE INITIALLY IMMEDIATE (not expressible in DBML).
+Ref: registry.usr.(ppt_id, site) > registry.ppt.(id, site) [update: cascade]
+Ref: registry.usr.(dvc_id, type) > registry.dvc.(id, type) [update: cascade]
+Ref: registry.usr.(acc_id, type) > registry.acc.(id, type) [update: cascade]
 
 Ref: raw.ingests.(usr_id, type) > registry.usr.(id, type)
 Ref: raw.pipeline.(usr_id, type) > registry.usr.(id, type)
@@ -407,12 +432,16 @@ TableGroup registry {
   registry.ppt
   registry.acc
   registry.usr
+
+  Note: 'Synced from config/study_registry.yml (source of truth): new values are added, changed values updated, removed values deleted.'
 }
 
 TableGroup raw {
   raw.ingests
   raw.pipeline
   raw.pull_coverage
+
+  Note: 'Raw payloads, run logs and pull coverage.'
 }
 
 TableGroup readings {
@@ -422,9 +451,12 @@ TableGroup readings {
   readings.fitbit6_exercise
   readings.fitbit6_sleep
   readings.fitbit6_days
+
+  Note: 'Processed device data, upserted on (usr_id, time).'
 }
 
 TableGroup accounts {
   accounts.usr
-}
 
+  Note: 'Optional account attribute snapshots.'
+}

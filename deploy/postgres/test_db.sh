@@ -45,7 +45,7 @@ if [ "$ready" != 1 ]; then
     exit 1
 fi
 
-echo "Seeding study data..."
+echo "Syncing study data..."
 PYTHONPATH=src python -m load.scripts.seed_registry
 
 echo "Running: $@"

@@ -1,6 +1,7 @@
 # ./src/general/utils_builder.py
 """
-Helpers over study_registry.yml, used by registry_builder.py (sync + validation), extract.py (resolve_usr) and the check_onboard_* scripts (select_targets). 
+Helpers to resolve study_registry.yml (SOURCE OF TRUTH). 
+Used by registry_builder.py (sync + validation) and extract.py (resolve_usr) and the check_onboard_* scripts (select_targets). 
 
 This is the YAML layer: it is the one place, besides registry_builder.py and the registry.* tables, that talks about devices (dvc_id), accounts/access credentials (acc_id).
 Nothing downstream of extract does.

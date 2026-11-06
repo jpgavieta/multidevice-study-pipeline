@@ -45,10 +45,10 @@ CREATE TABLE IF NOT EXISTS registry.usr (  -- user = participant + device + acco
     started_at   DATE NOT NULL,
     ended_at     DATE,
     last_updated TIMESTAMPTZ NOT NULL DEFAULT now(),
- 
-    FOREIGN KEY (ppt_id, site) REFERENCES registry.ppt(id, site) ON UPDATE CASCADE,  -- moving a participant to another site updates their usr rows too
-    FOREIGN KEY (dvc_id, type) REFERENCES registry.dvc(id, type),
-    FOREIGN KEY (acc_id, type) REFERENCES registry.acc(id, type),
+
+    FOREIGN KEY (ppt_id, site) REFERENCES registry.ppt(id, site) ON UPDATE CASCADE,  -- updates a participant's site + their usr rows
+    FOREIGN KEY (dvc_id, type) REFERENCES registry.dvc(id, type) ON UPDATE CASCADE DEFERRABLE INITIALLY IMMEDIATE,  -- deferrable: registry_builder.py's sync_registry() can update a device's type + its usr rows
+    FOREIGN KEY (acc_id, type) REFERENCES registry.acc(id, type) ON UPDATE CASCADE DEFERRABLE INITIALLY IMMEDIATE,  -- deferrable: registry_builder.py's sync_registry() can update a account's type + its usr rows
     UNIQUE (id, type),                       -- target for composite FKs (usr_id, type)
     CHECK (ended_at IS NULL OR ended_at > started_at),
     CONSTRAINT no_overlap_per_device  EXCLUDE USING gist (

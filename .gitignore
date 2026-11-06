@@ -46,5 +46,3 @@ __pycache__/
 *.egg-info/
 
 .gitattributes 
-
-deploy/aryan-test1/

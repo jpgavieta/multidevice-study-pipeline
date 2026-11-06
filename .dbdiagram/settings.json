@@ -1,6 +1,6 @@
 {
   "dbml": {
-    "entry": "db_schema.dbml"
+    "entry": "docs/db_schema.dbml"
   },
   "diagram": {
     "id": "",
@@ -8,7 +8,7 @@
   },
   "document": {
     "source": "file",
-    "workspaceUrlName": "",
-    "projectUrlName": "j-4/Multidevice-Study-DB"
+    "workspaceUrlName": "j-4",
+    "projectUrlName": "Multidevice-Study-DB"
   }
 }

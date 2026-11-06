@@ -3,8 +3,7 @@
 Seed/sync registry.type, site, dvc, ppt, acc and usr from config/study_registry.yml.
 
 The yml is the single source of truth: registry_builder.sync_all() makes the database mirror it, in ONE transaction.
-Safe to re-run: unchanged rows are not touched (last_updated stays put), changed rows are updated in place,
-and rows that are no longer in the yml are removed.
+Safe to re-run: unchanged rows are not touched (last_updated stays put), changed rows are updated in place, and rows that are no longer in the yml are removed.
 
 registry.usr (one row per participant + device + account window) is upserted on (dvc_id, started_at):
     -   changing ended_at / acc_id / ppt_id of an existing assignment updates the row in place (its usr_id is kept)
@@ -58,4 +57,5 @@ def main() -> int:
 
 
 if __name__ == "__main__":
+    print("Syncing registry from config/study_registry.yml...")        
     sys.exit(main())

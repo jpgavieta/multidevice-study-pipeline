@@ -460,6 +460,8 @@ def sync_registry(conn: "psycopg2.extensions.connection", data: dict[str, Any]) 
 
     with conn:  # commit on success, rollback on any exception (including a deferred overlap violation at COMMIT)
         with conn.cursor() as cur:
+            cur.execute("SET CONSTRAINTS ALL DEFERRED")  #  FK + overlap checks run at COMMIT, so dvc/acc/usr can change in any order
+            
             for spec, _ in PARENT_ORDER:
                 _upsert(cur, spec, rows[spec.name])
 
