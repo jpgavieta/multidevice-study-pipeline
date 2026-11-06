@@ -40,13 +40,13 @@ Project "multidevice_study_pipeline" {
 Table registry.type {
   id text [pk]
 
-  Note: 'Device types from the yml types list. Only an id, so a rename is an insert of the new value and a delete of the old one.'
+  Note: 'Device types from the yml types list. Only an id, rename is an insert of the new value and a delete of the old one.'
 }
 
 Table registry.site {
   id text [pk]
 
-  Note: 'Sites from the yml sites list. Only an id, so a rename is an insert of the new value and a delete of the old one.'
+  Note: 'Sites from the yml sites list. Only an id, rename is an insert of the new value and a delete of the old one.'
 }
 
 Table registry.dvc {
