@@ -6,12 +6,10 @@ Column mappings live in ./src/transform/register/atmotube2_registry.py.
 
 Output: {"atmotube2": [row, ...]}   (same key as load.py's DESTINATION_TABLES; empty if the payload has no records)
 
-Every row carries `usr_id` (passed in by transform.py; extract pulls per registry.usr row, so it is already known)
-and `recorded_at` as a tz-aware UTC datetime. `ingest_id` is NOT set here: load.py stamps it.
+Every row carries `usr_id` (passed in by transform.py; extract pulls per registry.usr row, so it is already known) and `recorded_at` as a tz-aware UTC datetime. `ingest_id` is NOT set here: load.py stamps it.
 
 Timestamps: Atmotube dates are UTC ISO 8601 ("...Z" or "+00:00"). A date with another offset is converted to UTC.
-A date with no offset at all is assumed to already be UTC. Records with no usable date are skipped (counted and printed),
-because readings.atmotube2.recorded_at is NOT NULL and one bad record should not fail the whole usr's load.
+A date with no offset at all is assumed to already be UTC. Records with no usable date are skipped (counted and printed), because readings.atmotube2.recorded_at is NOT NULL and one bad record should not fail the whole usr's load.
 
 latitude/longitude stay plain float fields on each row-dict (NOT built into a geometry here): load.py's _prepare_atmotube_rows()
 turns them into the EWKT `location` string at insert time and drops both keys.
