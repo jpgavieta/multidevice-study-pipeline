@@ -1,4 +1,4 @@
-// multidevice-study-pipeline: DBML for dbdiagram.io
+'// multidevice-study-pipeline: DBML for dbdiagram.io
 // Source: deploy/postgres/init/02_registry.sql ... 05_accounts.sql
 
 Project "multidevice_study_pipeline" {
@@ -40,13 +40,23 @@ Project "multidevice_study_pipeline" {
 Table registry.type {
   id text [pk]
 
-  Note: 'Device types from the yml types list. Only an id, rename is an insert of the new value and a delete of the old one.'
+  Note: '''
+    List of evice Types. 
+
+    Operations: UPSERT (insert, do nothing if it exists), DELETE 
+    Written by: sync_registry()
+   '''
 }
 
 Table registry.site {
   id text [pk]
 
-  Note: 'Sites from the yml sites list. Only an id, rename is an insert of the new value and a delete of the old one.'
+  Note: '''
+    List of participant Sites. 
+
+    Operations: UPSERT (insert, do nothing if it exists), DELETE 
+    Written by: sync_registry()
+  '''
 }
 
 Table registry.dvc {
@@ -60,6 +70,12 @@ Table registry.dvc {
   indexes {
     (id, type) [unique]
   }
+  Note: '''
+    List of Devices.
+    
+    Operations: UPSERT (update if the row differs), DELETE
+    Written by: sync_registry()
+  '''
 }
 
 Table registry.ppt {
@@ -73,6 +89,12 @@ Table registry.ppt {
   indexes {
     (id, site) [unique]
   }
+  Note: '''
+    List of Participant. 
+    
+    Operations: UPSERT (update if the row differs), DELETE
+    Written by: sync_registry()
+  '''
 }
 
 Table registry.acc {
@@ -83,8 +105,12 @@ Table registry.acc {
   indexes {
     (id, type) [unique]
   }
-
-  Note: 'Account data only. No credentials are stored.'
+  Note: '''
+    List of Accounts (access points). 
+      
+    Operations: UPSERT (update if the row differs), DELETE
+    Written by: sync_registry()
+  '''
 }
 
 Table registry.usr {
@@ -102,11 +128,16 @@ Table registry.usr {
     (id, type) [unique]
   }
   Note: '''
-    CENTRAL. participant + device + account/access over a time window = user. EXCLUDE constraints prevent overlapping windows per device and per account.
+    CENTRAL: participant (ppt) + device (dvc) + account (acc) + over a time window (started_at/ended_at) → generates a unique user instance (usr_id). 
 
-    The foreign keys to dvc and acc (ON UPDATE CASCADE) and the two overlap constraints are DEFERRABLE INITIALLY IMMEDIATE. The registry sync defers them at the start of its transaction, so a device and its account can change type together and the checks run at COMMIT. The key to ppt cascades site changes only.
+    Why these four args? Two device type models: 
+      1) dvc ||--|{ acc ||--|| ppt (one device, multiple account, one per participant / acc id identifies each ppt's data)
+      2) dvc ||--|| acc ||--|{ ppt (one device, one account, shared among participants / time window identifies each ppt's data)
+      
+    Operations: INSERT, UPDATE (keeps the id), DELETE
+    Written by: sync_registry() via _sync_usr()
   '''
-}
+} 
 // ---------------------------------------------------------------------------
 // raw: pipeline metadata and raw payloads
 // ---------------------------------------------------------------------------
@@ -115,7 +146,7 @@ Table raw.ingests {
   id bigint [pk, increment]
   usr_id bigint [not null]
   type text [not null]
-  ingest_method text [not null, note: '''
+  ingest_kind text [not null, note: '''
     api_forwardfill | api_backfill | csv_backfill | test
   ''']
   pulled_at timestamptz [not null, default: `now()`]
@@ -124,7 +155,12 @@ Table raw.ingests {
   indexes {
     (usr_id, pulled_at) [name: 'idx_ingests']
   }
-  Note: 'To backup the raw data. Append-only: one row per usr per pull.'
+  Note: '''
+    To backup raw pulls per usr.   
+
+    Operations: INSERT
+    Written by: load_raw_data()
+  '''
 }
 
 Table raw.pipeline {
@@ -139,7 +175,13 @@ Table raw.pipeline {
   indexes {
     (usr_id, started_at) [name: 'idx_pipeline']
   }
-  Note: 'To monitor the pipeline runs. One row per usr per run: inserted as running when the load starts, then updated once with the final status.'
+  Note: '''
+    To monitor pipeline runs per usr.
+    Inserted at the start, status = `running`; updated at the end, status = 'success | partial | failed'.
+        
+    Operations: INSERT, then UPDATE
+    Written by: pipeline_logger.py, called from load_processed_data()
+  '''
 }
 
 Table raw.pull_coverage {
@@ -158,9 +200,11 @@ Table raw.pull_coverage {
     (usr_id, data_type) [name: 'idx_pull_coverage']
   }
   Note: '''
-    To track time gaps in the data. Append-only. Written after a successful load, only for ranges that were scanned to the end. Only success rows count as covered, and raw.pull_gaps() uses them to find the date ranges a backfill still needs to pull.
+    To track date coverage per usr.
+    Only success rows count as covered, and raw.pull_gaps() uses them to find which date ranges to pull data for.
 
-    Currently written by the backfill and CSV-loader scripts. The daily job does not record coverage yet.
+    Operations: INSERT
+    Written by: backfill.py and additional CSV readers in 'src/extract/scripts'
   '''
 }
 
@@ -169,98 +213,192 @@ Table raw.pull_coverage {
 // ---------------------------------------------------------------------------
 
 Table readings.atmotube2 {
-  usr_id bigint [not null, note: 'Assignment (participant + device + account), not a person. Join via registry.usr.ppt_id to combine a participant\'s data.']
+  usr_id bigint [not null, note: 'Assignment of participant + device + account, not a person.']
   recorded_at timestamptz [not null, note: '''
-    Datasheet: `datetime`. ISO 8601, UTC-aware. Standardized timestamp and the key used to merge all parser category tables.
+    Unit: ISO 8601, UTC-aware. 
+    Desc: Standardized timestamp and the key used to merge all parser category tables.
   ''']
   aqs integer [note: '''
-    Datasheet: `aqs_total`. Unit: score 0-100 (integer), 0 = polluted, 100 = clean.
-    Aggregate Air Quality Score combining PM, TVOC, CO2 and NOx. Not a weather measurement, even though the parser pulls it alongside weather columns.
+    Unit: Score 0-100 (integer), 0-20 = severely polluted | 21-40 = very polluted | 41-60 = polluted | 61-80 = moderate | 81-100 = good.
+    Desc: Aggregate Air Quality Score calculated from CO2, TVOC, NOx, PM1, PM2.5, PM10.
+    Source: N/A
   ''']
 
-  // --- Particulate matter (Sensirion SPS30) ---
-  pm1 double [note: 'Datasheet: `pm1_0_ugm3_atm`. Unit: ug/m3. Mass concentration of particulate matter <= 1.0 um. Sensor: Sensirion SPS30.']
-  pm25 double [note: 'Datasheet: `pm2_5_ugm3_atm`. Unit: ug/m3. Mass concentration of particulate matter <= 2.5 um. Sensor: Sensirion SPS30.']
-  pm10 double [note: 'Datasheet: `pm10_ugm3_atm`. Unit: ug/m3. Mass concentration of particulate matter <= 10 um. Sensor: Sensirion SPS30.']
+  pm1 double [note: '''
+    Unit: ug/m3 (microgram per cubic meter).
+    Desc: Mass concentration of particles ≤ 1.0 um (micrometer) per atmospheric volume of air (cubic meter); used in AQS score.
+    Source: Sensirion SPS30.
+  ''']
+  pm25 double [note: '''
+    Unit: ug/m3 (microgram per cubic meter).
+    Desc: Mass concentration of particles ≤ 2.5 um (micrometer) per atmospheric volume of air (cubic meter); used in AQS score.
+    Source: Sensirion SPS30.
+  ''']
+  pm10 double [note: '''
+    Unit: ug/m3 (microgram per cubic meter).
+    Desc: Mass concentration of particles ≤ 10 um (micrometer) per atmospheric volume of air (cubic meter) used in AQS score. 
+    Source: Sensirion SPS30.
+  ''']
 
-  // --- PM extension (PRO 2 only) ---
   pm_size double [note: '''
-    Datasheet: `pmsize_um_avg`. Unit: um. Average particle size, converted from nm (nm / 1000).
-    PRO 2 only. The original nm value (`pmsize_nm_avg`) has no column here.
+    Unit: nm  (nanometer).
+    Desc: Average particle size (diameter) from raw count. 
+    Source: Sensirion SPS30.
   ''']
-  pm05_num integer [note: 'Datasheet: `pm0_5_um_count`. Unit: count per unit volume. Number of particles with diameter beyond 0.5 um. PRO 2 only.']
-  pm1_num integer [note: 'Datasheet: `pm1_0_um_count`. Unit: count. Number of particles with diameter beyond 1.0 um. PRO 2 only.']
-  pm10_num integer [note: 'Datasheet: `pm10_um_count`. Unit: count. Number of particles with diameter beyond 10 um. PRO 2 only.']
-  pm25_num integer [note: 'Datasheet: `pm2_5_um_count`. Unit: count. Number of particles with diameter beyond 2.5 um. PRO 2 only.']
-
-  // --- Weather (Bosch BME280) ---
-  temperature double [note: 'Datasheet: `temp_c`. Unit: degC. Ambient temperature. Sensor: Bosch BME280. Used downstream for heat index and dew point.']
+  pm05_num integer [note: '''
+    Unit: um (micrometer).
+    Desc: Raw count of particles ≤ 0.5 um (micrometer) per unit volume. 
+    Source: Sensirion SPS30.
+  ''']
+  pm1_num integer [note: '''
+    Unit: um (micrometer).
+    Desc: Raw count of particles ≤ 1.0 um (micrometer) per unit volume. 
+    Source: Sensirion SPS30.
+  ''']
+  pm10_num integer [note: '''
+    Unit: um (micrometer).
+    Desc: Raw count of particles ≤ 10 um (micrometer) per unit volume. 
+    Source: Sensirion SPS30.
+  ''']
+  pm25_num integer [note: '''
+    Unit: um (micrometer).
+    Desc: Raw count of particles ≤ 2.5 um (micrometer) per unit volume. 
+    Source: Sensirion SPS30.
+  '''] 
+ 
+  temperature double [note: '''
+    Unit: c (celcius degrees).
+    Desc: Actual temperature of the device's surrounding air (AKA ambient tempreature); used to compensate CO2 and TVOC/NOx sensor readings for thermal drift.
+    Source: Sensirion SHT40-AD1B.
+  ''']
   humidity double [note: '''
-    Datasheet: `hum_pct`. Unit: %. Relative humidity: water vapor in the air relative to the maximum it can hold at that temperature (0% = dry, 100% = saturated).
-    Sensor: Bosch BME280. Used downstream for heat index and dew point.
+    Unit: % (percent), 0 = dry | 100 = saturated.
+    Desc: Water vapor in the air relative to the maximum it can hold at that temperature (AKA relative humidity). 
+    Source: Sensirion SHT40-AD1B.
   ''']
   pressure double [note: '''
-    Datasheet: `press_hpa`. Unit: hPa. Atmospheric pressure at the current elevation (NOT adjusted to sea level).
-    Sensor: Bosch BME280. Used downstream for heat index and dew point.
+    Unit: hPa (hectopascals).
+    Desc: Atmospheric pressure at the device's current elevation; decreases with altitude (~1 hPa per 8 m); not used in the AQS score.
+    Source: Infineon DPS310
   ''']
 
-  // --- Gas (TVOC / NOx / CO2) ---
   voc double [note: '''
-    Datasheet: `tvoc_ppm`. Unit: ppm. Absolute concentration of Total Volatile Organic Compounds in one volume of air.
-    Sensor: Sensirion SGP41 (PRO 2 only; the original PRO uses the TVOC-only SGPC3).
+    Unit: ppm (parts per million).
+    Desc: Absolute concentration of Total Volatile Organic Compounds in the air; used in the AQS score.
+    Source: Sensirion SGP41.   
   ''']
   voc_index integer [note: '''
-    Datasheet: `tvoc_index`. Unit: index, 0-500. TVOC score relative to a rolling 24-hour baseline.
-    100 = baseline, >100 = becoming more polluted, <100 = becoming cleaner. Sensor: Sensirion SGP41.
+    Unit: index, 100 = baseline | >100 = more polluted |<100 = cleaner.
+    Desc: TVOC score relative to a rolling 24-hour baseline; used in the AQS score.
+    Source: Sensirion SGP41.   
   ''']
   nox_index integer [note: '''
-    Datasheet: `nox_index`. Unit: index, 0-500. Score for nitric oxide (NO) and nitrogen dioxide (NO2) relative to a rolling 24-hour baseline (100 = baseline).
-    Sensor: Sensirion SGP41 (the SGP40 has no NOx capability).
+    Unit: index, 100 = baseline | >100 = more polluted |<100 = cleaner.
+    Desc: Score for NO + NO2 relative to a rolling 24-hour baseline; used in the AQS score.
+    Source: Sensirion SGP41.   
   ''']
-  co2 double [note: 'Datasheet: `co2_ppm`. Unit: ppm. Absolute concentration of carbon dioxide in one volume of air. Sensor: Sensirion SCD41 (separate from the VOC/NOx sensor).']
+  co2 double [note:  '''
+    Unit: ppm (parts per million).
+    Desc: Absolute concentration of carbon dioxide in the air; used in the AQS score.
+    Source: Sensirion STCC4.   
+  ''']
 
-  // --- Phone state ---
-  battery integer [note: 'Datasheet: `battery_phone_pct`. Unit: %. Remaining battery charge on the phone (not the Atmotube). Source: phone OS.']
-  charging boolean [note: 'Datasheet: `charge_phone_bool`. Whether the phone was actively charging during data collection (raw value `yes`).']
+  battery integer [note:  '''
+    Unit: % (percent).
+    Desc: Remaining battery charge of the phone connected to the Atmotube device.
+    Source: Phone OS.    
+  ''']
+  charging boolean [note:  '''
+    Unit: boolean.
+    Desc: Whether the phone was actively charging during the reading; temperature and humidity can be hidden/paused while the device is charging due to self-heating.
+    Source: Phone OS.      
+  ''']
   recently_charged boolean [note: '''
-    Datasheet: `cooldown_phone_bool`. Whether the phone was in a post-charge cooldown state (raw value `cd`).
-    Kept separate from `charging` because cooldown may still affect phone/sensor performance.
+    Unit: boolean.
+    Desc: Whether the phone was in a post-charge cooldown state; separate from `charging` because residual heat from charging can still affect sensor readings.
+    Source: Phone OS.   
   ''']
-  motion boolean [note: 'Datasheet: `motion_phone_bool` (renamed from `motion_now_bool`). Whether the device was moving at the time of the reading. Source: phone motion sensors.']
+  motion boolean [note:  '''
+    Unit: boolean.
+    Desc: Whether the device was in motion at the time of the reading.
+    Source: MiraMEMS da213B.   
+   ''']
 
-  // --- GIS / location (phone GPS) ---
   altitude double [note: '''
-    Datasheet: `altitude`. Unit: m. Current elevation, derived from barometric pressure (Bosch BME280).
-    Optional: only present if an altitude-like column is detected in the source export.
+    Unit: m (meters).
+    Desc: Verticle height relative to the mean sea level of the device; Optional: if built-in GPS is off, there will be NO reading.
+    Source: Allystar TAU1113.   
   ''']
   position_error double [note: '''
-    Datasheet: `position_error_m`. Unit: m. Estimated accuracy of the phone's GPS fix.
-    Reflects the phone's GNSS chip, not the Atmotube. PRO 2 only.
+    Unit: m (meters), smaller value = more precise.
+    Desc: Estimated accuracy/uncertainty in the longitude and latitude of the device; if built-in GPS is off, readings are taken from the phone's GPS.
+    Source: Phone OS / Allystar TAU1113.   
   ''']
   satellites_fixed integer [note: '''
-    Datasheet: `sat_used_count` (renamed from `sat_fix_count`). Unit: count. Satellites used to calculate the location fix.
-    Minimum 4 for a 3D fix [lon, lat, alt]; minimum 3 for a 2D fix [lon, lat]. PRO 2 only.
+    Unit: count.
+    Desc: Raw count of satellites used to calculate the location fix of the device; minimum 4 for a 3D fix (longitude, latitude, altitude), minimum 3 for a 2D fix (longitude, latitude), Optional: if built-in GPS is off, there will be not altitude reading.
+    Source: Allystar TAU1113.   
   ''']
-  satellites_in_view integer [note: 'Datasheet: `sat_view_count`. Unit: count. Number of satellites currently in view. PRO 2 only.']
-  location geometry [note: '''
-    GEOMETRY(Point, 4326), calculated from datasheet `longitude` and `latitude` (degrees; 0 = equator / prime meridian). Source: phone GPS (the Atmotube has no internal GPS module).
-    Data-quality rule: rows with null lat/lon, or exactly (0.0, 0.0) ("null island"), are treated as invalid and carry no location/timezone.
+  satellites_in_view integer [note: '''
+    Unit: count, large value = improved location accuracy. 
+    Desc: Raw count of satellites currently in view of the device; Optional: if built-in GPS is off, there will be not NO reading.
+    Source: Allystar TAU1113.   
   ''']
 
-  // --- Pipeline ---
-  interpolated_cols "text[]" [note: 'Pipeline field (not in datasheet). Names of columns whose values in this row were interpolated rather than measured.']
-  ingest_id bigint [not null, note: 'Points back to the raw.ingests payload this row came from.']
+  snr_0_19 integer [note: '''
+    Unit: count.
+    Desc: Satellites in view with SNR in the 0-19 range (low signal strength); Optional: if built-in GPS is off, there will be not NO reading.
+    Source: Allystar TAU1113.
+  ''']
+  snr_20_49 integer [note: '''
+    Unit: count.
+    Desc: Satellites in view with SNR in the 20-49 range (medium signal strength); Optional: if built-in GPS is off, there will be not NO reading.
+    Source: Allystar TAU1113.
+  ''']
+  snr_50_99 integer [note: '''
+    Unit: count.
+    Desc: Satellites in view with SNR in the 50-99 range (high signal strength); Optional: if built-in GPS is off, there will be not NO reading.
+    Source: Allystar TAU1113.
+  ''']
+  snr_avg double [note: '''
+    Unit: snr (signal-to-noise ratio).
+    Desc: Average satellite signal strength relative to surrounding electronic background noise; Optional: if built-in GPS is off, there will be not NO reading.
+    Source: Allystar TAU1113.
+  ''']
+  user_notes text [note: '''
+    Unit: text.
+    Desc: Free-text notes entered by the user; only present in CSV exports; Optional: only available from CSV exports not API pulls.
+    Source: Atmotube PRO 2 App.
+  ''']
+
+  location geometry [note: '''
+    Unit: GEOMETRY(Point, 4326).
+    Desc: Point location calculated from recorded longitude and latitude of the device; for data quality, rows with null lat/lon or exactly (0.0, 0.0, AKA null island) are invalid.
+    Source: Phone OS / Allystar TAU1113.   
+  ''']
+
+  interpolated_cols "text[]" [note: 'Names of columns whose values in the row were interpolated (e.g., location from longitude and latitude).']
+  ingest_id bigint [not null, note: 'To identify the row's raw data from raw.ingests payload.']
 
   indexes {
     (usr_id, recorded_at) [unique]
   }
 
   Note: '''
-    TimescaleDB hypertable. partition: recorded_at, segmentby: usr_id. Creates location geometry from longitude + latitude.
+    TimescaleDB hypertable for Atmotube PRO 2 data. 
+    Partition: recorded_at, Segmentby: usr_id.
 
-    Atmotube PRO 2 data, mapped from the parser output in `src/parsers/atmotube.py` (see Atmotube datasheet). Each column note starts with the datasheet variable name it comes from.
+    Operations: UPSERT on (usr_id, recorded_at)
+    Written by: load_processed_data()
+  
+    Sources: 
+      - https://support.atmotube.com/en/articles/12629420-atmotube-pro-2-technical-specifications
+      - https://support.atmotube.com/en/articles/12621821-understanding-atmotube-pro-2-air-quality-score-aqs 
+      - https://support.atmotube.com/en/articles/12714501-atmotube-pro-2-api-documentation
+      - https://cdn.shopify.com/s/files/1/2156/7147/files/Atmotube_PRO_2_-_API_specification_-_v.1.5.pdf?v=1778851938
+      - https://github.com/atmotube/atmotube-android-ble/blob/b01986d010a6771545e5f7ce183bece20426c493/atmotubeble/src/main/java/com/atmotube/ble/AtmotubeUtils.java#L84
+      - https://support.atmotube.com/en/articles/13002682-history-mode-overview
 
-    TODO: variables with NO column in this table: `sat_lowsignal_count`, `sat_medsignal_count`, `sat_highsignal_count`, `sat_signal_avg`, `user_notes`.
   '''
 }
 
@@ -380,7 +518,12 @@ Table readings.fitbit6_days {
     (usr_id, started_at) [unique]
   }
 
-  Note: 'Daily (24-hr aggregated)'
+  Note: '''
+    Daily (24-hr aggregated).
+
+    Operations: UPSERT on (usr_id, recorded_at)
+    Written by: load_processed_data()
+  '''
 }
 
 Table readings.fitbit6 {
@@ -413,7 +556,13 @@ Table readings.fitbit6 {
     (usr_id, recorded_at) [unique]
   }
 
-  Note: 'TimescaleDB hypertable. partition: recorded_at, segmentby: usr_id. Combines continuous + interval + session data'
+  Note: '''
+    TimescaleDB hypertable for Fitbit Charge 6 data (combines continuous + interval + session data).
+    Partition: recorded_at, Segmentby: usr_id.
+
+    Operations: UPSERT on (usr_id, recorded_at)
+    Written by: load_processed_data()
+  '''
 }
 
 // ---------------------------------------------------------------------------

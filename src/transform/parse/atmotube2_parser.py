@@ -59,7 +59,7 @@ def parse(raw_data: dict, usr_id: int) -> dict:
             "latitude": record.get("lat"),
             "longitude": record.get("lon"),
         }
-        for raw_key, (standard_name, _unit, _dtype, _category) in ATMOTUBE_REGISTRY.items():
+        for raw_key, (standard_name, _unit, _dtype) in ATMOTUBE_REGISTRY.items():
             row[standard_name] = record.get(raw_key)
 
         rows.append(row)

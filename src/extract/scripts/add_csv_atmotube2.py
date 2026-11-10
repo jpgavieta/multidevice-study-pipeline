@@ -151,9 +151,18 @@ def _to_number(val):
     except ValueError:
         return None
 
+def _clean_note(val) -> Optional[str]:
+    """Free text from the last column: strip wrapping quotes, undo "" escapes, empty -> None."""
+    s = (val or "").strip()
+    if len(s) >= 2 and s[0] == '"' and s[-1] == '"':
+        s = s[1:-1].replace('""', '"').strip()
+    return s or None
 
-def _row_to_measurement(row: pd.Series, date_col: str, utc_offset: timedelta) -> dict:
-    # Local time (naive, offset taken from this file's header) -> shift to UTC to match the live API's convention
+
+def _find_notes_column(df: pd.DataFrame) -> Optional[str]:
+    return next((c for c in df.columns if c.strip().lower() == "user notes"), None)
+
+def _row_to_measurement(row: pd.Series, date_col: str, utc_offset: timedelta, notes_col: Optional[str]) -> dict:    # Local time (naive, offset taken from this file's header) -> shift to UTC to match the live API's convention
     local_dt = pd.to_datetime(row[date_col])
     utc_dt = local_dt - utc_offset
 
@@ -164,6 +173,8 @@ def _row_to_measurement(row: pd.Series, date_col: str, utc_offset: timedelta) ->
         "charging": charging,
         "recently_charged": recently_charged,
         "motion": str(row.get("Motion", "")).strip().lower() == "yes",
+        "user_notes": _clean_note(row.get(notes_col)) if notes_col else None,
+
     }
 
     for csv_col, api_field in COLUMN_MAP.items():
@@ -196,6 +207,9 @@ def _load_one_csv(path: Path) -> pd.DataFrame:
 
     header = lines[0].split(",")
     n_cols = len(header)
+
+    if header[-1].strip().lower() != "user notes":
+        print(f"  ⚠️ {path.name}: 'User Notes' is not the last column; commas in notes could shift fields")
 
     rows = []
     for i, line in enumerate(lines[1:], start=2):
@@ -356,7 +370,9 @@ def process_mac(mac: str, files: list[Path], acc_id: str, usrs: list[dict], usr_
         df = _load_one_csv(path)
         date_col = _find_date_column(df)
         utc_offset = _parse_utc_offset(date_col)   # per file: exports can differ in configured timezone
-        recs = [_row_to_measurement(row, date_col, utc_offset) for _, row in df.iterrows()]
+        notes_col = _find_notes_column(df)
+        recs = [_row_to_measurement(row, date_col, utc_offset, notes_col) for _, row in df.iterrows()]
+        
         print(f"  {_label(path, acc_id)}: {len(recs)} row(s), local time {date_col.strip()} -> UTC")
         if recs:
             dates = sorted(r["date"] for r in recs)
@@ -369,12 +385,12 @@ def process_mac(mac: str, files: list[Path], acc_id: str, usrs: list[dict], usr_
     dropped = len(records) - len(deduped) - conflicts
     if dropped or conflicts:
         print(f"  De-duplication: {len(records)} raw rows -> {len(deduped)} unique "
-              f"({dropped} identical-duplicate row(s) dropped, {conflicts} conflicting timestamp(s) flagged above)")
+            f"({dropped} identical-duplicate row(s) dropped, {conflicts} conflicting timestamp(s) flagged above)")
 
     by_usr, unassigned = _split_by_usr(deduped, usrs)
     if unassigned:
         print(f"  ⚠️ {len(unassigned)} reading(s) fall in no usr window of account {acc_id} and will NOT be loaded "
-              f"({unassigned[0]['date'][:10]} .. {unassigned[-1]['date'][:10]} UTC)")
+            f"({unassigned[0]['date'][:10]} .. {unassigned[-1]['date'][:10]} UTC)")
 
     out = {}
     for usr in usrs:

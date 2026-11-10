@@ -31,6 +31,11 @@ CREATE TABLE IF NOT EXISTS readings.atmotube2 ( -- wide hypertable
     position_error      DOUBLE PRECISION,
     satellites_fixed    INTEGER,
     satellites_in_view  INTEGER,
+    snr_0_19            INTEGER,            -- low satellite signal, satellites in view with SNR 0-19
+    snr_20_49           INTEGER,            -- medium signal, SNR 20-49
+    snr_50_99           INTEGER,            -- high signal, SNR 50-99
+    snr_avg             DOUBLE PRECISION,   -- average SNR / signal strength of satellites in view
+    user_notes          TEXT,                -- free text
     location            GEOMETRY(Point, 4326), -- calculated from longitude and latitude cols
 
     interpolated_cols   TEXT[], -- were any columns adjusted?
