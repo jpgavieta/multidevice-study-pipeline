@@ -140,7 +140,7 @@ def get_access_token(acc_id: str, allow_interactive: bool = True) -> str:
     if not allow_interactive:
         raise RuntimeError(
             f"No saved token for account '{acc_id}' — not onboarded yet. "
-            f"Run: python -m extract.scripts.verify_fitbit {acc_id}"
+            f"Run: python -m extract.scripts.check_onboard_fitbit6 {acc_id}"
         )
     return _run_interactive_auth(acc_id)
 

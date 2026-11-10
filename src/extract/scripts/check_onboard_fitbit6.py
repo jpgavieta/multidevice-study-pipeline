@@ -28,8 +28,7 @@ Exit code is 1 if any account/access checked is not onboarded.
 
 NOTE on --all / --onboard:
     -   account/accesss whose assignments have all ended are not in --all. Name them by their account/access id (useful before a backfill: their token may have expired).
-    -   onboarding needs a browser sign-in per account/access, one at a time, so you MUST know which window belongs to which account/access:
-        the Google login to use is printed above each prompt (NOT a personal account/access).
+    -   onboarding needs a browser sign-in per account/access, one at a time, so you MUST know which window belongs to which account/access: the Google login to use is printed above each prompt (NOT a personal account/access).
 """
 
 import argparse

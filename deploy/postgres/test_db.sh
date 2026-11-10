@@ -77,17 +77,17 @@ docker stop "$CONTAINER_NAME"
 
 # 4. Transform only: parser contract check on a capture you already have (no DB, no API, rerun as often as you like)
 # PYTHONPATH=src python -m transform.scripts.test_transform fitbit6 ppt_01_0201_test.json
-# PYTHONPATH=src python -m transform.scripts.test_transform atmotube2 ppt_07_atmo_05_test.json --sample 2
+# PYTHONPATH=src python -m transform.scripts.test_transform atmotube2 ppt_07_0105_test.json --sample 2
 
 # 5. Full pipeline against the disposable container (this script starts it, seeds it, runs your command, tears it down)
 #    5a. API pull + transform + load + idempotency check:
-#    PYTHONPATH=src ./deploy/postgres/test_db.sh python -m load.scripts.test_pipeline fitbit6 <ids>
-#    PYTHONPATH=src ./deploy/postgres/test_db.sh python -m load.scripts.test_pipeline atmotube2 <ids>
+# PYTHONPATH=src ./deploy/postgres/test_db.sh python -m load.scripts.test_pipeline fitbit6 <ids>
+# PYTHONPATH=src ./deploy/postgres/test_db.sh python -m load.scripts.test_pipeline atmotube2 <ids>
 #    5b. Reuse existing captures (no API quota, the usual way to iterate on load.py):
-#    PYTHONPATH=src ./deploy/postgres/test_db.sh python -m load.scripts.test_pipeline atmotube2 --captures ppt_07_0105_test.json
+# PYTHONPATH=src ./deploy/postgres/test_db.sh python -m load.scripts.test_pipeline atmotube2 --captures ppt_07_0105_test.json
 #    5c. If a capture can't be matched to a usr by file name, give the usr explicitly:
-#    PYTHONPATH=src ./deploy/postgres/test_db.sh python -m load.scripts.test_pipeline fitbit6 --captures ppt_01_0201_test.json --usr-id 12
-#    PYTHONPATH=src ./deploy/postgres/test_db.sh python -m load.scripts.test_pipeline atmotube2 --captures ppt_07_0105_test.json --usr-id 13
+# PYTHONPATH=src ./deploy/postgres/test_db.sh python -m load.scripts.test_pipeline fitbit6 --captures ppt_01_0201_test.json --usr-id 12
+# PYTHONPATH=src ./deploy/postgres/test_db.sh python -m load.scripts.test_pipeline atmotube2 --captures ppt_07_0105_test.json --usr-id 13
 #    NOTE: the usr-id is not the actual usr_id from the db...honestly, this is scuffed what i did was spin up the test_db and then count from here...
 #           WARNING study_registry.yml: device 'atmo_01': end_date is null but its last assignment ended 2026-09-18 -- extraction may keep pulling it
 #           INFO registry.usr added: ppt_02/atmo_02/0102 [2026-06-15, open)

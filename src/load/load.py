@@ -8,11 +8,9 @@ Input shape everywhere:  { type: { usr_id: {...} } }   (type = registry.type id,
 
 UPSERTS
     Every processed table upserts on its UNIQUE key, so re-pulling overlapping date ranges (backfill windows, a scheduler retry) is safe.
-    Several data types fill the same wide row (readings.fitbit6 / atmotube2 / fitbit6_days), and a pull may only cover some of them,
-    so every data column is merged as  col = COALESCE(EXCLUDED.col, t.col):  a re-pull never NULLs out a column it did not fetch.
+    Several data types fill the same wide row (readings.fitbit6 / atmotube2 / fitbit6_days), and a pull may only cover some of them, so every data column is merged as  col = COALESCE(EXCLUDED.col, t.col):  a re-pull never NULLs out a column it did not fetch.
     (Consequence: a value can be replaced but never cleared back to NULL by a re-pull. ingest_id always points at the latest pull.)
-    Rows that share a conflict key INSIDE one batch are merged column by column (non-NULL wins, later rows win ties),
-    because Postgres refuses to update one row twice in a statement and a plain "last row wins" would drop columns.
+    Rows that share a conflict key INSIDE one batch are merged column by column (non-NULL wins, later rows win ties), because Postgres refuses to update one row twice in a statement and a plain "last row wins" would drop columns.
     EXCEPTION: raw.ingests is an append-only log; every load_raw_data() call adds new rows.
 
 LOAD ORDER (per usr_id)
@@ -22,21 +20,19 @@ LOAD ORDER (per usr_id)
     3.  everything else (readings.fitbit6_days, readings.atmotube2, accounts.usr)
 
 WINDOW CHECK
-    Everything is UTC. registry.usr windows [started_at, ended_at) are read as UTC dates, and a timestamptz row is
-    compared by its UTC date (DATE columns such as fitbit6_days.started_at are used as is). Pulls are padded by a day,
-    so a payload can hold rows outside the usr's window. Those rows are NOT loaded (they belong to a different usr, or to nobody).
+    Everything is UTC. registry.usr windows [started_at, ended_at) are read as UTC dates, and a timestamptz row is compared by its UTC date (DATE columns such as fitbit6_days.started_at are used as is). 
+    Pulls are padded by a day, so a payload can hold rows outside the usr's window. 
+    Those rows are NOT loaded (they belong to a different usr, or to nobody).
     They are counted and reported in raw.pipeline.error_message, and the full payload is still in raw.ingests.
     Rows are never dropped silently. On a handover day the edge can be off by a few hours (no per-usr timezone).
 
 FAILURE ISOLATION
     load_processed_data() commits per usr_id: one usr's failure rolls back only that usr, is logged in raw.pipeline as 'failed', and the rest of the batch loads.
-    load_raw_data() isolates row-building per usr_id the same way; the batch INSERT itself is one execute_values() call / one commit,
-    and a failure there is systemic, so it rolls back and re-raises for main.py's retry/notify layer.
+    load_raw_data() isolates row-building per usr_id the same way; the batch INSERT itself is one execute_values() call / one commit, a failure there is systemic, so it rolls back and re-raises for main.py's retry/notify layer.
 
 RETURN VALUE (for backfill / CSV loaders)
     load_processed_data() returns { (type, usr_id): "success" | "partial" | "failed" | "skipped" }.
-    Coverage (raw.pull_coverage) must only be written for "success" / "partial" usr_ids, and only for what the
-    pull actually scanned (decide that from the RAW payload, not from this result: a Fitbit data type that is None there FAILED).
+    Coverage (raw.pull_coverage) must only be written for "success" / "partial" usr_ids, and only for what the pull actually scanned (decide that from the RAW payload, not from this result: a Fitbit data type that is None there FAILED).
 """
 
 import json

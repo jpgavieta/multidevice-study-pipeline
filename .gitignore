@@ -45,4 +45,4 @@ __pycache__/
 *.py[cod]
 *.egg-info/
 
-.gitattributes 
+.gitattributes data/payloads/

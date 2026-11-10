@@ -3,17 +3,19 @@
 Backfill: finds the stretches of each usr's window that were never (successfully) scanned and pulls them.
 Seeding a new database and healing gaps are the same operation -- with no coverage rows, every window is one big gap.
 
-    PYTHONPATH=src python -m load.scripts.backfill_readings --dry-run                      # what would be pulled
+    PYTHONPATH=src python -m load.scripts.backfill_readings --check                        # sanity check: code + yml, NO database
+PYTHONPATH=src ./deploy/postgres/test_db.sh python -m load.scripts.backfill_readings --dry-run   # test what would be pulled (reads the database)
+    PYTHONPATH=src ./deploy/postgres/test_db.sh python -m load.scripts.backfill_readings --usr 12  --max-jobs 2 --max-minutes 1 # test a single usr, bounded run
+
     PYTHONPATH=src python -m load.scripts.backfill_readings                                # everything missing, all usrs
-    PYTHONPATH=src python -m load.scripts.backfill_readings --usr 12 14 --since 2026-07-01
-    PYTHONPATH=src python -m load.scripts.backfill_readings --type fitbit6 --data-type sleep heart-rate --max-jobs 20
+    PYTHONPATH=src python -m load.scripts.backfill_readings --type fitbit6 --data-type sleep heart-rate --max-jobs 20 # specified
+    PYTHONPATH=src python -m load.scripts.backfill_readings --max-jobs 40 --max-minutes 60   # bounded run (what main.py does)
 
 HOW IT WORKS
     1.  PLAN    for every usr x data_type, raw.pull_gaps(usr, data_type, now - SYNC_LAG) returns the uncovered UTC-day ranges.
-                They are cut on a fixed per-usr grid of CHUNK_DAYS (so different data types fall into the same windows and can
-                be pulled in ONE api call), then grouped by window: one job = (usr, [start, end), {data types}).
-    2.  PULL    one client call per job, one-way, with the usr's credential (utils_builder.resolve_usr -- the only place a usr
-                becomes a credential). A fetch that failed or was cut short is NEVER marked covered.
+                They are cut on a fixed per-usr grid of CHUNK_DAYS (so different data types fall into the same windows and can be pulled in ONE api call), then grouped by window: one job = (usr, [start, end), {data types}).
+    2.  PULL    one client call per job, one-way, with the usr's credential (utils_builder.resolve_usr -- the only place a usr becomes a credential). 
+                A fetch that failed or was cut short is NEVER marked covered.
     3.  LOAD    load_raw_data -> transform_usr_data -> load_processed_data, the same functions the daily job uses.
     4.  RECORD  raw.pull_coverage gets a row for what the pull actually scanned, after the load succeeded.
                 Fitbit:    one row per data type that came back (None = failed -> nothing written; an empty list = scanned, 0 rows).
@@ -26,23 +28,19 @@ COVERAGE IS ONLY AS GOOD AS THE LAG
     and rerun, or pull the range again with --since.
 
 THINGS TO KNOW
-    -   Data types in PULL_TOGETHER are always pulled together for a window (sleep + its respiratory-rate summary are merged
-        into one fitbit6_sleep row by the parser), even if only one of them has a gap there. Re-pulling covered data is harmless.
-    -   Timeline rows get their sleep_id / exercise_id / ecg_id by the parser tagging them inside ONE payload. Types pulled in
-        the same window are parsed together, but a heal that re-pulls only a few types can leave those ids NULL on rows
-        from types that were not in the pull.
-    -   Jobs run one at a time per process: that keeps within the Fitbit per-token and Atmotube 60/min site-wide limits
-        (the Atmotube limit is not enforced in the client yet -- do not add parallelism before it is).
-    -   Each job is one raw.ingests row and one raw.pipeline row (written by load_processed_data), so a long seed produces
-        many of them. CHUNK_DAYS trades payload size (dense heart-rate!) against row count.
+    -   Data types in PULL_TOGETHER are always pulled together for a window (sleep + its respiratory-rate summary are merged into one fitbit6_sleep row by the parser), even if only one of them has a gap there -- re-pulling covered data is harmless.
+    -   Timeline rows get their sleep_id / exercise_id / ecg_id by the parser tagging them inside ONE payload. Types pulled in the same window are parsed together, but a heal that re-pulls only a few types can leave those ids NULL on rows from types that were not in the pull.
+    -   Jobs run one at a time per process: that keeps within the Fitbit per-token and Atmotube 60/min site-wide limits (the Atmotube limit is not enforced in the client yet -- do not add parallelism before it is).
+    -   Each job is one raw.ingests row and one raw.pipeline row (written by load_processed_data), so a long seed produces many of them. CHUNK_DAYS trades payload size (dense heart-rate!) against row count.
     -   After MAX_CONSECUTIVE_FAILURES failed jobs in a row, the rest of that usr is skipped (expired token, revoked access).
+    -   A run is bounded by max_jobs and/or max_minutes. The time budget is checked BEFORE each job starts, so a job already running can overrun it (e.g. a 28-day Atmotube chunk). What a bounded run did not get to is reported as "pending" in the summary and simply continues on the next run.
 
 REUSE
-    load.coverage.record_coverage() is what the daily job and the CSV loader (extract/scripts/add_csv_atmotube2.py) call
-    after a successful load, for the window they scanned. Without it, the days they loaded show up as gaps here and get pulled again.
+    load.coverage.record_coverage() is what the daily job and the CSV loader (extract/scripts/add_csv_atmotube2.py) call after a successful load, for the window they scanned. Without it, the days they loaded show up as gaps here and get pulled again.
 """
 
 import argparse
+import sys
 from collections import defaultdict
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
@@ -246,15 +244,19 @@ def _run_job(conn, config: dict, job: dict, spec: TypeSpec, ingest_kind: str) ->
 def run_backfill(usr_ids: Optional[list[int]] = None, type_: Optional[str] = None,
                 data_types: Optional[list[str]] = None, since: Optional[date] = None,
                 chunk_days: Optional[int] = None, sync_lag_days: Optional[int] = None,
-                max_jobs: Optional[int] = None, dry_run: bool = False,
+                max_jobs: Optional[int] = None, max_minutes: Optional[int] = None, dry_run: bool = False,
                 ingest_kind: str = "api_backfill", config_path: str = "config/study_registry.yml") -> dict[str, Any]:
     """
-    Plans and (unless dry_run) runs the backfill. Returns {"jobs", "ok", "partial", "failed", "skipped"}.
-    max_jobs bounds a run (e.g. when called from the daily job); the next run continues where this one stopped.
+    Plans and (unless dry_run) runs the backfill.
+    Returns {"jobs", "ok", "partial", "failed", "skipped", "pending"}:
+        jobs     planned jobs this run (after the max_jobs cut)
+        pending  planned jobs NOT attempted: cut by max_jobs, cut by the time budget, or skipped for a dead usr
+    max_jobs / max_minutes bound a run (e.g. when called from the daily job); the next run continues where this one stopped.
+    max_minutes is checked before each job starts, so a job already running can overrun it. None / 0 = no time limit.
     """
     specs = _specs()
     conn = connect_db()
-    summary = {"jobs": 0, "ok": 0, "partial": 0, "failed": 0, "skipped": 0}
+    summary = {"jobs": 0, "ok": 0, "partial": 0, "failed": 0, "skipped": 0, "pending": 0}
     try:
         usrs = _select_usrs(conn, usr_ids, type_)
         jobs = plan_jobs(conn, usrs, specs, set(data_types) if data_types else None, since, chunk_days, sync_lag_days)
@@ -279,9 +281,13 @@ def run_backfill(usr_ids: Optional[list[int]] = None, type_: Optional[str] = Non
             return summary
 
         config = load_registry(config_path)
+        deadline = datetime.now(UTC) + timedelta(minutes=max_minutes) if max_minutes else None
         streak: dict[int, int] = defaultdict(int)       # consecutive failed jobs per usr
         dead: set[int] = set()
         for j in jobs:
+            if deadline is not None and datetime.now(UTC) >= deadline:
+                print(f"   ⏱️ time budget of {max_minutes} min used up — the rest continues next run")
+                break
             usr_id = j["usr"]["usr_id"]
             if usr_id in dead:
                 summary["skipped"] += 1
@@ -303,11 +309,65 @@ def run_backfill(usr_ids: Optional[list[int]] = None, type_: Optional[str] = Non
                 dead.add(usr_id)
                 print(f"   🛑 usr {usr_id}: {MAX_CONSECUTIVE_FAILURES} failed jobs in a row — skipping the rest of this usr "
                     f"(expired Fitbit token? re-run onboarding for its account)")
+
+        # planned jobs that were not attempted: cut by max_jobs, cut by the time budget, or skipped for a dead usr
+        summary["pending"] = total_jobs - summary["ok"] - summary["partial"] - summary["failed"]
     finally:
         conn.close()
 
     print(f"Backfill finished: {summary}")
     return summary
+
+
+# ============================================================================================================
+# sanity check (--check): no database, no API calls
+
+def check_setup(config_path: str = "config/study_registry.yml") -> int:
+    """Checks that the code and the yml are wired together correctly. Returns the number of problems found."""
+    problems = 0
+
+    def ok(msg: str) -> None:
+        print(f"   ✅ {msg}")
+
+    def bad(msg: str) -> None:
+        nonlocal problems
+        problems += 1
+        print(f"   ❌ {msg}")
+
+    try:
+        specs = _specs()
+        ok("type specs: " + ", ".join(f"{t} ({len(sp.data_types)} data types)" for t, sp in specs.items()))
+    except Exception as e:
+        bad(f"building the type specs failed: {type(e).__name__}: {str(e)[:300]}")
+        return problems
+
+    for t, spec in specs.items():
+        if not spec.data_types:
+            bad(f"{t}: no data types")
+        if t not in CHUNK_DAYS:
+            bad(f"{t}: missing from CHUNK_DAYS")
+        if t not in SYNC_LAG_DAYS:
+            bad(f"{t}: missing from SYNC_LAG_DAYS (pull_coverage.py)")
+        for group in PULL_TOGETHER.get(t, []):
+            if group - spec.data_types:
+                bad(f"{t}: PULL_TOGETHER names data types the type does not have: {sorted(group - spec.data_types)}")
+    ok("CHUNK_DAYS / SYNC_LAG_DAYS / PULL_TOGETHER match the registered types")
+
+    # the grid must cover [lo, hi) exactly: contiguous, no overlap, clipped at both ends
+    lo, hi, anchor = date(2026, 1, 10), date(2026, 1, 25), date(2026, 1, 1)
+    chunks = list(_grid_chunks(lo, hi, anchor, 7))
+    if chunks and chunks[0][0] == lo and chunks[-1][1] == hi and all(a[1] == b[0] for a, b in zip(chunks, chunks[1:])):
+        ok("chunk grid covers a range exactly")
+    else:
+        bad(f"chunk grid is wrong: {chunks}")
+
+    try:
+        load_registry(config_path)
+        ok(f"{config_path} loads and validates")
+    except Exception as e:
+        bad(f"{config_path}: {type(e).__name__}: {str(e)[:300]}")
+
+    return problems
 
 
 # ============================================================================================================
@@ -321,10 +381,17 @@ def _main() -> None:
     p.add_argument("--chunk-days", type=int, help="override the per-type chunk size")
     p.add_argument("--sync-lag", type=int, dest="sync_lag_days", help="override SYNC_LAG_DAYS: never certify the last N days")
     p.add_argument("--max-jobs", type=int, help="stop after N jobs (the next run continues)")
-    p.add_argument("--dry-run", action="store_true", help="list the jobs, pull nothing")
+    p.add_argument("--max-minutes", type=int, help="stop starting new jobs after N minutes (a running job can overrun it)")
+    p.add_argument("--dry-run", action="store_true", help="list the jobs, pull nothing (reads the database)")
+    p.add_argument("--check", action="store_true", help="sanity-check the code and study_registry.yml only: no database, no API calls")
     a = p.parse_args()
+    if a.check:
+        print("Sanity check (no database, no API calls):")
+        n = check_setup()
+        print("✅ All checks passed." if n == 0 else f"❌ {n} problem(s) found.")
+        sys.exit(1 if n else 0)
     run_backfill(usr_ids=a.usr, type_=a.type_, data_types=a.data_type, since=a.since, chunk_days=a.chunk_days,
-                sync_lag_days=a.sync_lag_days, max_jobs=a.max_jobs, dry_run=a.dry_run)
+                sync_lag_days=a.sync_lag_days, max_jobs=a.max_jobs, max_minutes=a.max_minutes, dry_run=a.dry_run)
 
 
 if __name__ == "__main__":

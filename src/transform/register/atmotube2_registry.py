@@ -26,9 +26,9 @@ ATMOTUBE_REGISTRY = {
     "position_error":     ("position_error",       "m",         "Int64"),
     "satellites_fixed":   ("satellites_fixed",     "count",     "Int64"),
     "satellites_in_view": ("satellites_in_view",   "count",     "Int64"),
-    "snr0_19":            ("snr0_19",              "count",     "Int64"),
-    "snr20_49":           ("snr20_49",             "count",     "Int64"),
-    "snr50_99":           ("snr50_99",             "count",     "Int64"),
+    "snr0_19":            ("snr_0_19",              "count",     "Int64"),
+    "snr20_49":           ("snr_20_49",             "count",     "Int64"),
+    "snr50_99":           ("snr_50_99",             "count",     "Int64"),
     "snr_avg":            ("snr_avg",              "snr",       "float64"),
     "user_notes":         ("user_notes",           None,        "string"),
 }

@@ -31,7 +31,7 @@ This repo pulls Fitbit (Google Health API) and Atmotube data into a self-hosted 
 
 Each run logs a row per usr to `raw.pipeline` (via `general/pipeline_logger.py`), so failures show up in the database instead of only in stdout. `load.py` runs the full sequence when invoked directly. In production, `src/main.py` runs it on a schedule.
 
-![ETL Pipeline](multidevice_study_pipeline.png)
+![ETL Pipeline](docs/multidevice_study_pipeline.png)
 
 [View the DB's ERD and documentation](https://dbdocs.io/embed/187112b888433d4bef3c317f7eaa3199/80399c5036af4c629cc7b52772ef521c)
 

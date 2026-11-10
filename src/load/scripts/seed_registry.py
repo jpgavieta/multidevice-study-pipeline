@@ -5,12 +5,16 @@ Seed/sync registry.type, site, dvc, ppt, acc and usr from config/study_registry.
 The yml is the single source of truth: registry_builder.sync_all() makes the database mirror it, in ONE transaction.
 Safe to re-run: unchanged rows are not touched (last_updated stays put), changed rows are updated in place, and rows that are no longer in the yml are removed.
 
-registry.usr (one row per participant + device + account window) is upserted on (dvc_id, started_at):
-    -   changing ended_at / acc_id / ppt_id of an existing assignment updates the row in place (its usr_id is kept)
-    -   changing an assignment's started_at is a DELETE + INSERT: the row gets a NEW usr_id.
-        If anything in raw.* / readings.* still points at the old usr_id, the delete is refused and the whole sync rolls back.
+registry.usr (one row per participant + device + account window) is matched to existing rows by (dvc_id, started_at), then by same ppt + device + account with an overlapping window (see registry_builder):
+    -   a corrected started_at / ended_at / acc_id / ppt_id updates the row in place (its usr_id is kept)
+    -   an entry matching nothing is inserted; a row matching no entry is deleted
+    If anything in raw.* / readings.* still points at a row being deleted, the delete is refused and the whole sync rolls back.
 
 The yml is validated BEFORE the database is touched; a bad yml (unset !ENV, type mismatch, overlapping windows...) changes nothing.
+
+Two entry points:
+    run()   importable (main.py calls it): RAISES on failure, returns the row counts
+    main()  command line: prints, returns an exit code
 
 USAGE (from the repo root, so the default config path resolves):
     PYTHONPATH=src python -m load.scripts.seed_registry
@@ -34,28 +38,35 @@ def _count(cur, table: str) -> int:
     return row[0] if row is not None else 0
 
 
-def main() -> int:
-    logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")  # sync_all reports yml warnings and removed rows via logging
-
+def run() -> dict[str, int]:
+    """
+    Sync registry.* from the yml and return {table: row count}.
+    Raises ValueError / EnvironmentError / FileNotFoundError on a bad or missing yml (database unchanged).
+    """
     conn = connect_db()
     try:
-        try:
-            sync_all(conn)
-        except (ValueError, EnvironmentError, FileNotFoundError) as e:
-            print(f"❌ Registry sync failed, database unchanged:\n{e}")
-            return 1
-
+        sync_all(conn)
         with conn.cursor() as cur:
-            counts = {t: _count(cur, t) for t in REGISTRY_TABLES}
-
-        print("✅ Seeded registry: "
-            f"{counts['type']} type(s), {counts['site']} site(s), {counts['dvc']} device(s), "
-            f"{counts['ppt']} participant(s), {counts['acc']} account(s), {counts['usr']} usr row(s)")
-        return 0
+            return {t: _count(cur, t) for t in REGISTRY_TABLES}
     finally:
         conn.close()
 
 
+def main() -> int:
+    logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")  # sync_all reports yml warnings and removed rows via logging
+
+    try:
+        counts = run()
+    except (ValueError, EnvironmentError, FileNotFoundError) as e:
+        print(f"❌ Registry sync failed, database unchanged:\n{e}")
+        return 1
+
+    print("✅ Seeded registry: "
+        f"{counts['type']} type(s), {counts['site']} site(s), {counts['dvc']} device(s), "
+        f"{counts['ppt']} participant(s), {counts['acc']} account(s), {counts['usr']} usr row(s)")
+    return 0
+
+
 if __name__ == "__main__":
-    print("Syncing registry from config/study_registry.yml...")        
+    print("Syncing registry from config/study_registry.yml...")
     sys.exit(main())

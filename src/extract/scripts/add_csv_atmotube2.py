@@ -218,7 +218,7 @@ def _load_one_csv(path: Path) -> pd.DataFrame:
         parts = line.split(",", maxsplit=n_cols - 1)
         if len(parts) < n_cols:
             print(f"  ⚠️ {path.name} line {i}: expected {n_cols} fields, got {len(parts)} "
-                  f"— padding with blanks")
+                f"— padding with blanks")
             parts += [""] * (n_cols - len(parts))
         rows.append(parts)
 

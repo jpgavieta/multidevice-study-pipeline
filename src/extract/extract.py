@@ -13,8 +13,18 @@ Every pull is clipped to that window, so two usrs that shared a device (same Atm
 Each returned entry carries the window that was actually pulled, "window": (start, end_inclusive), 
     so the caller can record what was scanned in raw.pull_coverage (see main.py / load/coverage.py). 
     transform and load ignore this key.
+
+FAILED PULLS: a usr whose pull failed (or came back incomplete) has no entry in the result, by design. 
+    So that the caller can still tell "nothing to pull" from "pull failed", every failure of the LAST extract_all_usrs() call is also listed in LAST_PULL_FAILURES
+    (one short, URL-free string per usr). main.py reports them in the Slack summary.
+
+CONSOLE OUTPUT: usrs are pulled IN PARALLEL (MAX_PARALLEL_USRS at once), so lines from different usrs interleave. 
+    Every line printed here carries "usr <id> [type]": a "▶ ... pulling" line when that usr's thread starts and a "[n/total] ... pulled / FAILED" line when it finishes. 
+    Progress lines printed INSIDE a client carry whatever the client puts in them. 
+    To read one usr at a time, run with max_workers=1:   python -c "from extract.extract import extract_all_usrs as f; f(max_workers=1)"
 """
 
+import time
 from datetime import date, datetime, timedelta, timezone
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from threading import Lock
@@ -37,8 +47,9 @@ CLIENT_REGISTRY = {  # keyed by registry.usr.type
 
 # Outer cap on usrs pulled at the same time. Each client fans out further internally
 #   -   fitbit6_client:   MAX_WORKERS_PER_USR requests at once (paced per token by its own rate limiter)
-#   -   atmotube2_client: MAX_WORKERS_PER_USR chunk requests at once (60 requests/min is shared by ALL Atmotube usrs)
-# so TOTAL concurrent requests = this number * the per-client workers. Lower it if rate limits start to bite.
+#   -   atmotube2_client: MAX_WORKERS_PER_USR chunk requests at once, but EVERY Atmotube request (all usrs) first takes a slot from the
+#                         client's shared rate limiter (50/min of the 60/min site-wide limit), so extra usr threads just queue.
+# Total in-flight requests are therefore bounded by the limiters, not by this number. Lower it only to quiet the console.
 MAX_PARALLEL_USRS = 12
 
 # Must match raw.ingests.ingest_kind's CHECK constraint (deploy/postgres/init/03_raw.sql).
@@ -49,7 +60,28 @@ VALID_INGEST_METHODS = {"api_forwardfill", "api_backfill", "csv_backfill"}
 # Anything longer (a brand-new usr falling back to its window start, or a long outage) is a historical load: every page of every data type, held in memory.
 LONG_PULL_WARN_DAYS = 14
 
+# What went wrong in the LAST extract_all_usrs() call: ["usr 5 [atmotube2]: RuntimeError: incomplete pull, failed: [...]", ...].
+# Emptied at the start of every call and only ever mutated in place, so `from extract.extract import LAST_PULL_FAILURES` stays valid.
+# Texts never contain a URL (an Atmotube URL contains the MAC).
+LAST_PULL_FAILURES: list[str] = []
+
+_print_lock = Lock()
+
 # ============================================================================================================
+
+
+def _say(msg: str) -> None:
+    """Thread-safe print (flushed: under systemd stdout is a pipe and would otherwise arrive late)."""
+    with _print_lock:
+        print(msg, flush=True)
+
+
+def _describe_error(e: BaseException) -> str:
+    """Never str(e) for HTTP errors: requests embeds the URL, and an Atmotube URL contains the MAC."""
+    if isinstance(e, (RuntimeError, ValueError, LookupError)):
+        return f"{type(e).__name__}: {str(e)[:300]}"
+    status = getattr(getattr(e, "response", None), "status_code", None)
+    return type(e).__name__ + (f" (HTTP {status})" if status else "")
 
 
 def load_usr_rows(conn) -> list[dict]:
@@ -108,9 +140,16 @@ def _failed_parts(type_: str, payload) -> list[str]:
     return []
 
 
-def _pull_one_usr(client_usr: dict, start_date: str, end_date: str):
-    """Returns (usr_id, payload_or_None, error_or_None). An incomplete pull comes back as (usr_id, None, error), never as partial data."""
+def _pull_one_usr(client_usr: dict, start_date: str, end_date: str, started: dict | None = None):
+    """
+    Returns (usr_id, payload_or_None, error_or_None). An incomplete pull comes back as (usr_id, None, error), never as partial data.
+    `started`, if given, receives {usr_id: time.monotonic()} when this usr's thread begins (the caller uses it for timings).
+    """
     usr_id, type_ = client_usr["usr_id"], client_usr["type"]
+    if started is not None:
+        started[usr_id] = time.monotonic()
+    _say(f"   ▶ usr {usr_id} [{type_}] pulling {start_date} → {end_date}")
+
     client_fn = CLIENT_REGISTRY.get(type_)
     if client_fn is None:
         return usr_id, None, NotImplementedError(f"No client registered for type={type_}")
@@ -129,10 +168,12 @@ def extract_all_usrs(config_path="config/study_registry.yml", end_date=None,
                     max_workers=MAX_PARALLEL_USRS, ingest_kind="api_forwardfill") -> dict[str, dict[int, dict]]:
     """
     Returns { type: { usr_id: {"payload", "ingest_kind", "window"} } }, where window = (start, end_inclusive) as dates.
-    A usr that failed or had nothing to pull has no entry.
+    A usr that failed or had nothing to pull has no entry; failures are also listed in LAST_PULL_FAILURES.
     """
     if ingest_kind not in VALID_INGEST_METHODS:
         raise ValueError(f"Invalid ingest_kind={ingest_kind!r}; must be one of {VALID_INGEST_METHODS}")
+
+    LAST_PULL_FAILURES.clear()
 
     config = load_registry(config_path)
     end_date_obj = date.fromisoformat(end_date) if end_date else datetime.now(timezone.utc).date()
@@ -152,29 +193,28 @@ def extract_all_usrs(config_path="config/study_registry.yml", end_date=None,
     for u in usr_rows:
         plan = _resolve_pull(config, u, last_success[u["usr_id"]], end_date_obj)
         if isinstance(plan, str):
-            print(f"   ⏭️ Skipping usr {u['usr_id']} [{u['type']}]: {plan}")
+            _say(f"   ⏭️ Skipping usr {u['usr_id']} [{u['type']}]: {plan}")
+            if plan.startswith("cannot resolve credentials"):      # a config problem, not "nothing to do": surface it
+                LAST_PULL_FAILURES.append(f"usr {u['usr_id']} [{u['type']}]: {plan[:200]}")
             continue
         client_usr, start, end_incl = plan
         days = (end_incl - start).days + 1
         if days > LONG_PULL_WARN_DAYS:
-            print(f"   ⚠️ usr {u['usr_id']}: pulling {days} days ({start} → {end_incl}) in one go -- historical load")
+            _say(f"   ⚠️ usr {u['usr_id']} [{u['type']}]: pulling {days} days ({start} → {end_incl}) in one go -- historical load")
         plans.append((client_usr, start, end_incl))
 
     all_data: dict[str, dict[int, dict]] = {}
     windows = {client_usr["usr_id"]: (start, end_incl) for client_usr, start, end_incl in plans}
-    print_lock = Lock()
-
-    def safe_print(msg):
-        with print_lock:
-            print(msg)
 
     print(f"--- Pulling {len(plans)} of {len(usr_rows)} usr row(s) (end={end_date_obj}) ---")
     if not plans:
         return {}
 
+    started: dict[int, float] = {}
+    done = 0
     with ThreadPoolExecutor(max_workers=max(1, min(max_workers, len(plans)))) as executor:
         future_to_usr = {
-            executor.submit(_pull_one_usr, client_usr, str(start), str(end_incl)): client_usr
+            executor.submit(_pull_one_usr, client_usr, str(start), str(end_incl), started): client_usr
             for client_usr, start, end_incl in plans
         }
         for future in as_completed(future_to_usr):
@@ -182,8 +222,14 @@ def extract_all_usrs(config_path="config/study_registry.yml", end_date=None,
             type_, usr_id = client_usr["type"], client_usr["usr_id"]
             _, payload, error = future.result()
 
+            done += 1
+            took = time.monotonic() - started.get(usr_id, time.monotonic())
+            tag = f"[{done}/{len(plans)}] usr {usr_id} [{type_}]"
+
             if payload is None:
-                safe_print(f"   ❌ Failed usr {usr_id} [{type_}]: {error}")
+                reason = _describe_error(error or RuntimeError("no payload"))
+                _say(f"   ❌ {tag} FAILED after {took:.0f}s: {reason}")
+                LAST_PULL_FAILURES.append(f"usr {usr_id} [{type_}]: {reason}")
                 continue
 
             all_data.setdefault(type_, {})[usr_id] = {
@@ -191,7 +237,7 @@ def extract_all_usrs(config_path="config/study_registry.yml", end_date=None,
                 "ingest_kind": ingest_kind,
                 "window": windows[usr_id],
             }
-            safe_print(f"   ✅ Pulled usr {usr_id} [{type_}]")
+            _say(f"   ✅ {tag} pulled in {took:.0f}s")
 
     for type_, per_usr in all_data.items():
         print(f"  ✅ {type_}: {len(per_usr)} usr_id(s) pulled")
