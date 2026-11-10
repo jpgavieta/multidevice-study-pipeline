@@ -1,4 +1,4 @@
-'// multidevice-study-pipeline: DBML for dbdiagram.io
+// multidevice-study-pipeline: DBML for dbdiagram.io
 // Source: deploy/postgres/init/02_registry.sql ... 05_accounts.sql
 
 Project "multidevice_study_pipeline" {
@@ -378,7 +378,7 @@ Table readings.atmotube2 {
   ''']
 
   interpolated_cols "text[]" [note: 'Names of columns whose values in the row were interpolated (e.g., location from longitude and latitude).']
-  ingest_id bigint [not null, note: 'To identify the row's raw data from raw.ingests payload.']
+  ingest_id bigint [not null, note: 'To identify the raw data for this row in raw.ingests payload.']
 
   indexes {
     (usr_id, recorded_at) [unique]
