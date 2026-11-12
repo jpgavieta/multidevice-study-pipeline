@@ -35,8 +35,8 @@ import argparse
 import sys
 from datetime import datetime, timezone
 
-from general.registry_builder import load_registry
-from general.utils_builder import select_targets, describe_target, classify_ids
+from general.registry import load_registry
+from general.utils import select_targets, describe_target, classify_ids
 from extract.config.tokens import get_fitbit_token
 from extract.clients.fitbit6_client import get_profile
 

@@ -55,8 +55,8 @@ from typing import Optional
 
 import pandas as pd
 
-from general.db_connect import connect_db
-from general.registry_builder import load_registry
+from general.connect_db import connect_db
+from general.registry import load_registry
 from load.scripts.pull_coverage import record_coverage
 from load.load import load_processed_data, load_raw_data
 from transform.register import atmotube2_registry

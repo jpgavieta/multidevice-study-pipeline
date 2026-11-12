@@ -37,8 +37,8 @@ from datetime import datetime, timedelta, timezone
 
 import requests
 
-from general.registry_builder import load_registry
-from general.utils_builder import find_assignments, select_targets, describe_target, classify_ids
+from general.registry import load_registry
+from general.utils import find_assignments, select_targets, describe_target, classify_ids
 from extract.config.tokens import get_atmotube_api_key
 from extract.clients.atmotube2_client import DATA_BASE_URL, _normalize_mac, _describe_error
 

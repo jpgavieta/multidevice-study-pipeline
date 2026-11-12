@@ -73,7 +73,7 @@ def _ppt_for(target: dict, wanted: str | None) -> str:
 
 def _select(config, type_: str, tokens: list[str], active_on: date | None) -> tuple[list[dict], str | None]:
     """Returns (matching accounts, the ppt_id the caller gave, if any)."""
-    from general.utils_builder import select_targets, find_assignments
+    from general.utils import select_targets, find_assignments
     ids: dict[str, str | None] = {"ppt_id": None, "dvc_id": None, "acc_id": None}
     for token in tokens:
         kind = _kind_of(config, find_assignments, token)
@@ -102,7 +102,7 @@ def _count(value):
 
 def pull_one(config, target: dict, ppt_id: str, usr_id: int, start: date, end: date, force: bool) -> bool:
     from extract.extract import CLIENT_REGISTRY, _failed_parts
-    from general.utils_builder import resolve_usr
+    from general.utils import resolve_usr
 
     acc_id, type_ = target["acc_id"], target["type"]
     who = ", ".join(f"{a['ppt_id']}/{a['dvc_id']}" for a in target["assignments"]) or "no assignment"
@@ -179,7 +179,7 @@ def main():
     if args.days < 1:
         sys.exit("❌ --days must be at least 1")
 
-    from general.registry_builder import load_registry
+    from general.registry import load_registry
     config = load_registry()
 
     end = date.fromisoformat(args.end) if args.end else datetime.now(timezone.utc).date()

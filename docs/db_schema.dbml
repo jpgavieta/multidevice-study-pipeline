@@ -180,7 +180,7 @@ Table raw.pipeline {
     Inserted at the start, status = `running`; updated at the end, status = 'success | partial | failed'.
         
     Operations: INSERT, then UPDATE
-    Written by: pipeline_logger.py, called from load_processed_data()
+    Written by: log_pipeline.py, called from load_processed_data()
   '''
 }
 

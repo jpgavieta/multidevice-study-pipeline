@@ -29,7 +29,7 @@ This repo pulls Fitbit (Google Health API) and Atmotube data into a self-hosted 
 3. **Transform:** `transform_usr_data()` runs each payload through its device type's parser (`transform/parse/`, registered in `transform/register/`). This produces typed, unit-standardized, UTC-normalized rows.
 4. **Load processed:** `load_processed_data()` upserts those rows into `readings.*`, with each row linked back to its `ingest_id`.
 
-Each run logs a row per usr to `raw.pipeline` (via `general/pipeline_logger.py`), so failures show up in the database instead of only in stdout. `load.py` runs the full sequence when invoked directly. In production, `src/main.py` runs it on a schedule.
+Each run logs a row per usr to `raw.pipeline` (via `general/log_pipeline.py`), so failures show up in the database instead of only in stdout. `load.py` runs the full sequence when invoked directly. In production, `src/main.py` runs it on a schedule.
 
 ![ETL Pipeline](docs/multidevice_study_pipeline.png)
 
