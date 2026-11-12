@@ -32,9 +32,8 @@ CREATE TABLE IF NOT EXISTS raw.pipeline (
                     CHECK (status IN ('running', 'success', 'partial', 'failed')),
     started_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
     ended_at        TIMESTAMPTZ,
-    error_message   TEXT,
     FOREIGN KEY (usr_id, type) REFERENCES registry.usr(id, type)
-);
+);  
 
 CREATE INDEX IF NOT EXISTS idx_pipeline
     ON raw.pipeline (usr_id, started_at DESC);
@@ -80,16 +79,16 @@ CREATE OR REPLACE FUNCTION raw.pull_gaps(
 LANGUAGE sql STABLE AS $$
     WITH w AS (
         SELECT
-            (u.started_at::timestamp AT TIME ZONE 'UTC') AS lo,
+            (a.started_at::timestamp AT TIME ZONE 'UTC') AS lo,
             LEAST(
-                COALESCE(u.ended_at::timestamp AT TIME ZONE 'UTC', 'infinity'::timestamptz),
+                COALESCE(a.ended_at::timestamp AT TIME ZONE 'UTC', 'infinity'::timestamptz),
                 date_trunc('day', p_until AT TIME ZONE 'UTC') AT TIME ZONE 'UTC'
             ) AS hi
-        FROM registry.usr AS u
-        WHERE u.id = p_usr
+        FROM registry.usr_assignment AS a
+        WHERE a.usr_id = p_usr                      -- usr id, not the assignment id
     ), want AS (
-        -- GREATEST: a usr that starts after p_until would otherwise build an inverted range, which is an error
-        SELECT tstzmultirange(tstzrange(lo, GREATEST(lo, hi), '[)')) AS m FROM w
+        -- GREATEST: a window that starts after p_until would otherwise build an inverted range, which is an error
+        SELECT COALESCE(range_agg(tstzrange(lo, GREATEST(lo, hi), '[)')), '{}'::tstzmultirange) AS m FROM w
     ), have AS (
         SELECT COALESCE(range_agg(c.covered), '{}'::tstzmultirange) AS m
         FROM raw.pull_coverage AS c
