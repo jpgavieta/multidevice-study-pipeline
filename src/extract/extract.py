@@ -14,12 +14,17 @@ Each returned entry carries the window that was actually pulled, "window": (star
     so the caller can record what was scanned in raw.pull_coverage (see main.py / load/coverage.py). 
     transform and load ignore this key.
 
-FAILED PULLS: a usr whose pull failed (or came back incomplete) has no entry in the result, by design. 
-    So that the caller can still tell "nothing to pull" from "pull failed", every failure of the LAST extract_all_usrs() call is also listed in LAST_PULL_FAILURES
-    (one short, URL-free string per usr). main.py reports them in the Slack summary.
+PULL CAP (max_days): one pull covers at most the LAST max_days days of what it would otherwise pull. 
+    A brand-new usr or a long outage would otherwise be a months-long historical load held in memory (and, for Fitbit, longer than an access token lives). 
+    The part that is cut off is not lost: it was never recorded as scanned (raw.pull_coverage), so the backfill step finds it as a gap and pulls it in bounded jobs.
 
-CONSOLE OUTPUT: usrs are pulled IN PARALLEL (MAX_PARALLEL_USRS at once), so lines from different usrs interleave. 
-    Every line printed here carries "usr <id> [type]": a "▶ ... pulling" line when that usr's thread starts and a "[n/total] ... pulled / FAILED" line when it finishes. 
+FAILED PULLS: a usr whose pull failed (or came back incomplete) has no entry in the result, by design. 
+    So that the caller can still tell "nothing to pull" from "pull failed", 
+    every failure of the LAST extract_all_usrs() call is also listed in LAST_FORWARDFILL_FAILURES (one short, URL-free string per usr). 
+    main.py reports them in the Slack summary.
+
+CONSOLE OUTPUT: usrs are pulled IN PARALLEL (MAX_PARALLEL_USRS at once), so lines from different usrs interleave. Every line printed
+    here carries "usr <id> [type]": a "▶ ... pulling" line when that usr's thread starts and a "[n/total] ... pulled / FAILED" line when it finishes. 
     Progress lines printed INSIDE a client carry whatever the client puts in them. 
     To read one usr at a time, run with max_workers=1:   python -c "from extract.extract import extract_all_usrs as f; f(max_workers=1)"
 """
@@ -29,11 +34,11 @@ from datetime import date, datetime, timedelta, timezone
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from threading import Lock
 
-from general.registry_builder import load_registry
-from general.pipeline_logger import last_successful_fetch
-from general.utils_builder import resolve_usr
+from general.registry import load_registry
+from general.log_pipeline import last_successful_fetch
+from general.utils import resolve_usr
 
-from general.db_connect import connect_db
+from general.connect_db import connect_db
 
 from extract.clients import fitbit6_client
 from extract.clients import atmotube2_client
@@ -61,9 +66,9 @@ VALID_INGEST_METHODS = {"api_forwardfill", "api_backfill", "csv_backfill"}
 LONG_PULL_WARN_DAYS = 14
 
 # What went wrong in the LAST extract_all_usrs() call: ["usr 5 [atmotube2]: RuntimeError: incomplete pull, failed: [...]", ...].
-# Emptied at the start of every call and only ever mutated in place, so `from extract.extract import LAST_PULL_FAILURES` stays valid.
+# Emptied at the start of every call and only ever mutated in place, so `from extract.extract import LAST_FORWARDFILL_FAILURES` stays valid.
 # Texts never contain a URL (an Atmotube URL contains the MAC).
-LAST_PULL_FAILURES: list[str] = []
+LAST_FORWARDFILL_FAILURES: list[str] = []
 
 _print_lock = Lock()
 
@@ -85,24 +90,35 @@ def _describe_error(e: BaseException) -> str:
 
 
 def load_usr_rows(conn) -> list[dict]:
-    """One row per registry.usr entry. Window is [started_at, ended_at); ended_at NULL = open."""
+    """
+    One row per registry.usr entry, with all its windows: {"usr_id", "type", "acc_id", "windows": [(start, end), ...]}.
+    Windows are half-open [start, end), oldest first; end NULL = open. A usr with no assignment is not returned.
+    """
     with conn.cursor() as cur:
         cur.execute("""
-            SELECT id AS usr_id, type, acc_id, started_at, ended_at
-            FROM registry.usr
-            ORDER BY id
+            SELECT u.id, u.type, u.acc_id, a.started_at, a.ended_at
+            FROM registry.usr u
+            JOIN registry.usr_assignment a ON a.usr_id = u.id
+            ORDER BY u.id, a.started_at
         """)
-        cols = [c[0] for c in cur.description]
-        return [dict(zip(cols, r)) for r in cur.fetchall()]
+        rows: dict[int, dict] = {}
+        for usr_id, type_, acc_id, s, e in cur.fetchall():
+            rows.setdefault(usr_id, {"usr_id": usr_id, "type": type_, "acc_id": acc_id, "windows": []})["windows"].append((s, e))
+        return list(rows.values())
 
 
 def _resolve_pull(config: dict, usr: dict, last_success, end: date) -> tuple[dict, date, date] | str:
     """
     One usr -> (client_usr, start, end_inclusive), or a string saying why there is nothing to pull.
-    Both dates are INCLUSIVE civil dates (what the clients take); the usr window itself is half-open.
-    A backfill can reuse this with last_success=None to get the usr's whole window.
+    Both dates are INCLUSIVE civil dates (what the clients take); the usr windows are half-open.
+    Only the LATEST window that has started by `end` is pulled. Earlier windows (and the gap between windows,
+    which may belong to someone else) are never pulled here; backfill heals what is left of earlier windows.
+    A backfill can reuse this with last_success=None to get that window whole.
     """
-    u_start, u_end = usr["started_at"], usr["ended_at"]
+    started = [w for w in usr["windows"] if w[0] <= end]
+    if not started:
+        return f"first window starts {usr['windows'][0][0]}, after pull end {end}"
+    u_start, u_end = started[-1]
     if u_start > end:
         return f"window starts {u_start}, after pull end {end}"
 
@@ -165,15 +181,19 @@ def _pull_one_usr(client_usr: dict, start_date: str, end_date: str, started: dic
 
 
 def extract_all_usrs(config_path="config/study_registry.yml", end_date=None,
-                    max_workers=MAX_PARALLEL_USRS, ingest_kind="api_forwardfill") -> dict[str, dict[int, dict]]:
+                    max_workers=MAX_PARALLEL_USRS, ingest_kind="api_forwardfill",
+                    max_days: int | None = None) -> dict[str, dict[int, dict]]:
     """
     Returns { type: { usr_id: {"payload", "ingest_kind", "window"} } }, where window = (start, end_inclusive) as dates.
-    A usr that failed or had nothing to pull has no entry; failures are also listed in LAST_PULL_FAILURES.
+    A usr that failed or had nothing to pull has no entry; failures are also listed in LAST_FORWARDFILL_FAILURES.
+    max_days: pull at most the last N days per usr (see PULL CAP in the module docstring); None = no cap.
     """
+    if max_days is not None and max_days < 1:
+        raise ValueError(f"max_days must be >= 1, got {max_days}")
     if ingest_kind not in VALID_INGEST_METHODS:
         raise ValueError(f"Invalid ingest_kind={ingest_kind!r}; must be one of {VALID_INGEST_METHODS}")
 
-    LAST_PULL_FAILURES.clear()
+    LAST_FORWARDFILL_FAILURES.clear()
 
     config = load_registry(config_path)
     end_date_obj = date.fromisoformat(end_date) if end_date else datetime.now(timezone.utc).date()
@@ -195,9 +215,14 @@ def extract_all_usrs(config_path="config/study_registry.yml", end_date=None,
         if isinstance(plan, str):
             _say(f"   ⏭️ Skipping usr {u['usr_id']} [{u['type']}]: {plan}")
             if plan.startswith("cannot resolve credentials"):      # a config problem, not "nothing to do": surface it
-                LAST_PULL_FAILURES.append(f"usr {u['usr_id']} [{u['type']}]: {plan[:200]}")
+                LAST_FORWARDFILL_FAILURES.append(f"usr {u['usr_id']} [{u['type']}]: {plan[:200]}")
             continue
         client_usr, start, end_incl = plan
+        if max_days is not None and (end_incl - start).days + 1 > max_days:
+            capped_start = end_incl - timedelta(days=max_days - 1)
+            _say(f"   ✂️ usr {u['usr_id']} [{u['type']}]: pull capped to the last {max_days} days ({capped_start} → {end_incl}); "
+                 f"{start} → {capped_start - timedelta(days=1)} is left to the backfill step")
+            start = capped_start
         days = (end_incl - start).days + 1
         if days > LONG_PULL_WARN_DAYS:
             _say(f"   ⚠️ usr {u['usr_id']} [{u['type']}]: pulling {days} days ({start} → {end_incl}) in one go -- historical load")
@@ -229,7 +254,7 @@ def extract_all_usrs(config_path="config/study_registry.yml", end_date=None,
             if payload is None:
                 reason = _describe_error(error or RuntimeError("no payload"))
                 _say(f"   ❌ {tag} FAILED after {took:.0f}s: {reason}")
-                LAST_PULL_FAILURES.append(f"usr {usr_id} [{type_}]: {reason}")
+                LAST_FORWARDFILL_FAILURES.append(f"usr {usr_id} [{type_}]: {reason}")
                 continue
 
             all_data.setdefault(type_, {})[usr_id] = {

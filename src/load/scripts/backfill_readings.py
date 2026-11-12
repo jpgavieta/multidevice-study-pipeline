@@ -4,18 +4,16 @@ Backfill: finds the stretches of each usr's window that were never (successfully
 Seeding a new database and healing gaps are the same operation -- with no coverage rows, every window is one big gap.
 
     PYTHONPATH=src python -m load.scripts.backfill_readings --check                        # sanity check: code + yml, NO database
-PYTHONPATH=src ./deploy/postgres/test_db.sh python -m load.scripts.backfill_readings --dry-run   # test what would be pulled (reads the database)
-    PYTHONPATH=src ./deploy/postgres/test_db.sh python -m load.scripts.backfill_readings --usr 12  --max-jobs 2 --max-minutes 1 # test a single usr, bounded run
-
+    PYTHONPATH=src python -m load.scripts.backfill_readings --dry-run                      # what would be pulled (reads the database)
     PYTHONPATH=src python -m load.scripts.backfill_readings                                # everything missing, all usrs
-    PYTHONPATH=src python -m load.scripts.backfill_readings --type fitbit6 --data-type sleep heart-rate --max-jobs 20 # specified
-    PYTHONPATH=src python -m load.scripts.backfill_readings --max-jobs 40 --max-minutes 60   # bounded run (what main.py does)
+    PYTHONPATH=src python -m load.scripts.backfill_readings --usr 12 14 --since 2026-07-01
+    PYTHONPATH=src python -m load.scripts.backfill_readings --type fitbit6 --data-type sleep heart-rate --max-jobs 20
+    PYTHONPATH=src python -m load.scripts.backfill_readings --max-jobs 40 --max-minutes 60 --workers 4   # bounded run (what main.py does)
 
 HOW IT WORKS
     1.  PLAN    for every usr x data_type, raw.pull_gaps(usr, data_type, now - SYNC_LAG) returns the uncovered UTC-day ranges.
                 They are cut on a fixed per-usr grid of CHUNK_DAYS (so different data types fall into the same windows and can be pulled in ONE api call), then grouped by window: one job = (usr, [start, end), {data types}).
-    2.  PULL    one client call per job, one-way, with the usr's credential (utils_builder.resolve_usr -- the only place a usr becomes a credential). 
-                A fetch that failed or was cut short is NEVER marked covered.
+    2.  PULL    one client call per job, one-way, with the usr's credential (utils.resolve_usr -- the only place a usr becomes a credential). A fetch that failed or was cut short is NEVER marked covered.
     3.  LOAD    load_raw_data -> transform_usr_data -> load_processed_data, the same functions the daily job uses.
     4.  RECORD  raw.pull_coverage gets a row for what the pull actually scanned, after the load succeeded.
                 Fitbit:    one row per data type that came back (None = failed -> nothing written; an empty list = scanned, 0 rows).
@@ -23,14 +21,14 @@ HOW IT WORKS
     Everything  is idempotent (upserts), so a crash anywhere just means the same window is a gap again next run.
 
 COVERAGE IS ONLY AS GOOD AS THE LAG
-    SYNC_LAG_DAYS (defined in coverage.py, shared with the daily job): a watch can sync days late with old timestamps, so the most recent days are never certified (they stay gaps
-    until the lag has passed). If a late sync still slips through, delete that usr's raw.pull_coverage rows for the days
-    and rerun, or pull the range again with --since.
+    SYNC_LAG_DAYS (defined in coverage.py, shared with the daily job): a watch can sync days late with old timestamps, so the most recent days are never certified (they stay gaps until the lag has passed). 
+    If a late sync still slips through, delete that usr's raw.pull_coverage rows for the days and rerun, or pull the range again with --since.
 
 THINGS TO KNOW
-    -   Data types in PULL_TOGETHER are always pulled together for a window (sleep + its respiratory-rate summary are merged into one fitbit6_sleep row by the parser), even if only one of them has a gap there -- re-pulling covered data is harmless.
+    -   Data types in PULL_TOGETHER are always pulled together for a window (sleep + its respiratory-rate summary are merged into one fitbit6_sleep row by the parser), even if only one of them has a gap there. Re-pulling covered data is harmless.
     -   Timeline rows get their sleep_id / exercise_id / ecg_id by the parser tagging them inside ONE payload. Types pulled in the same window are parsed together, but a heal that re-pulls only a few types can leave those ids NULL on rows from types that were not in the pull.
-    -   Jobs run one at a time per process: that keeps within the Fitbit per-token and Atmotube 60/min site-wide limits (the Atmotube limit is not enforced in the client yet -- do not add parallelism before it is).
+    -   Jobs of ONE usr always run one after the other (oldest window first); different usrs run in parallel, up to max_workers at a time,
+        each worker on its own DB connection. That is safe for the API limits because both clients pace themselves: Fitbit per account (its own limiter) and Atmotube across the whole process (a shared 50/min limiter). Jobs are handed out round-robin across usrs, so a max_jobs cut or the time budget spreads progress over everybody instead of finishing usr 1 before usr 2 starts.
     -   Each job is one raw.ingests row and one raw.pipeline row (written by load_processed_data), so a long seed produces many of them. CHUNK_DAYS trades payload size (dense heart-rate!) against row count.
     -   After MAX_CONSECUTIVE_FAILURES failed jobs in a row, the rest of that usr is skipped (expired token, revoked access).
     -   A run is bounded by max_jobs and/or max_minutes. The time budget is checked BEFORE each job starts, so a job already running can overrun it (e.g. a 28-day Atmotube chunk). What a bounded run did not get to is reported as "pending" in the summary and simply continues on the next run.
@@ -41,15 +39,19 @@ REUSE
 
 import argparse
 import sys
+import threading
+from itertools import zip_longest
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from collections import defaultdict
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from typing import Any, Callable, Optional
 
-from general.db_connect import connect_db
-from general.pipeline_logger import end_run, start_run
-from general.registry_builder import load_registry
-from general.utils_builder import resolve_usr
+from general.connect_db import connect_db
+from general.log_pipeline import end_run, start_run
+from general.registry import load_registry
+from general.utils import resolve_usr, select_usrs as _select_usrs
+
 from extract.clients import atmotube2_client, fitbit6_client
 from transform.register import atmotube2_registry, fitbit6_registry
 from transform.transform import transform_usr_data
@@ -158,17 +160,6 @@ def _log_run(conn, usr_id: int, type_: str, status: str, message: str) -> None:
 # ============================================================================================================
 # planning
 
-def _select_usrs(conn, usr_ids: Optional[list[int]], type_: Optional[str]) -> list[dict]:
-    with conn.cursor() as cur:
-        cur.execute(
-            "SELECT id, type, acc_id, started_at FROM registry.usr "
-            "WHERE (%(ids)s::bigint[] IS NULL OR id = ANY(%(ids)s)) AND (%(type)s::text IS NULL OR type = %(type)s) "
-            "ORDER BY id",
-            {"ids": usr_ids, "type": type_},
-        )
-        return [{"usr_id": r[0], "type": r[1], "acc_id": r[2], "started_at": r[3]} for r in cur.fetchall()]
-
-
 def find_gaps(conn, usr_id: int, data_type: str, until: datetime, since: Optional[date] = None) -> list[tuple[date, date]]:
     """Uncovered [start, end) UTC-day ranges of one usr / data type, oldest first. `since` cuts off everything earlier."""
     with conn.cursor() as cur:
@@ -204,6 +195,14 @@ def plan_jobs(conn, usrs: list[dict], specs: dict[str, TypeSpec], data_type_filt
                     types |= (group & spec.data_types)
             jobs.append({"usr": usr, "lo": c_lo, "hi": c_hi, "types": types})
     return jobs
+
+
+def _interleave(jobs: list[dict]) -> list[dict]:
+    """Round-robin across usrs: job 1 of every usr, then job 2 of every usr, ... Each usr's own jobs keep their (oldest-first) order."""
+    per_usr: dict[int, list[dict]] = defaultdict(list)
+    for j in jobs:
+        per_usr[j["usr"]["usr_id"]].append(j)
+    return [j for round_ in zip_longest(*per_usr.values()) for j in round_ if j is not None]
 
 
 # ============================================================================================================
@@ -244,7 +243,7 @@ def _run_job(conn, config: dict, job: dict, spec: TypeSpec, ingest_kind: str) ->
 def run_backfill(usr_ids: Optional[list[int]] = None, type_: Optional[str] = None,
                 data_types: Optional[list[str]] = None, since: Optional[date] = None,
                 chunk_days: Optional[int] = None, sync_lag_days: Optional[int] = None,
-                max_jobs: Optional[int] = None, max_minutes: Optional[int] = None, dry_run: bool = False,
+                max_jobs: Optional[int] = None, max_minutes: Optional[int] = None, max_workers: int = 4, dry_run: bool = False,
                 ingest_kind: str = "api_backfill", config_path: str = "config/study_registry.yml") -> dict[str, Any]:
     """
     Plans and (unless dry_run) runs the backfill.
@@ -253,6 +252,7 @@ def run_backfill(usr_ids: Optional[list[int]] = None, type_: Optional[str] = Non
         pending  planned jobs NOT attempted: cut by max_jobs, cut by the time budget, or skipped for a dead usr
     max_jobs / max_minutes bound a run (e.g. when called from the daily job); the next run continues where this one stopped.
     max_minutes is checked before each job starts, so a job already running can overrun it. None / 0 = no time limit.
+    max_workers: usrs processed in parallel (one job at a time per usr). 1 = fully sequential.
     """
     specs = _specs()
     conn = connect_db()
@@ -260,6 +260,7 @@ def run_backfill(usr_ids: Optional[list[int]] = None, type_: Optional[str] = Non
     try:
         usrs = _select_usrs(conn, usr_ids, type_)
         jobs = plan_jobs(conn, usrs, specs, set(data_types) if data_types else None, since, chunk_days, sync_lag_days)
+        jobs = _interleave(jobs)
         total_jobs = len(jobs)
         if max_jobs is not None:
             jobs = jobs[:max_jobs]
@@ -282,33 +283,80 @@ def run_backfill(usr_ids: Optional[list[int]] = None, type_: Optional[str] = Non
 
         config = load_registry(config_path)
         deadline = datetime.now(UTC) + timedelta(minutes=max_minutes) if max_minutes else None
+
+        # One shared queue in round-robin order. A worker takes the first job whose usr has no job running (so a usr's jobs stay
+        # sequential), runs it on its own connection, and reports back. State below is guarded by `cv`.
+        cv = threading.Condition()
+        queue: list[dict] = list(jobs)
+        busy: set[int] = set()                          # usrs with a job running right now
         streak: dict[int, int] = defaultdict(int)       # consecutive failed jobs per usr
         dead: set[int] = set()
-        for j in jobs:
-            if deadline is not None and datetime.now(UTC) >= deadline:
-                print(f"   ⏱️ time budget of {max_minutes} min used up — the rest continues next run")
-                break
-            usr_id = j["usr"]["usr_id"]
-            if usr_id in dead:
-                summary["skipped"] += 1
-                continue
+        timed_out = False
+
+        def take() -> Optional[dict]:
+            nonlocal timed_out
+            with cv:
+                while True:
+                    if deadline is not None and datetime.now(UTC) >= deadline:
+                        if not timed_out:
+                            timed_out = True
+                            print(f"   ⏱️ time budget of {max_minutes} min used up — the rest continues next run")
+                        return None
+                    if not queue:
+                        return None
+                    for i, j in enumerate(queue):
+                        if j["usr"]["usr_id"] not in busy:
+                            del queue[i]
+                            busy.add(j["usr"]["usr_id"])
+                            return j
+                    cv.wait(timeout=1.0)                # every queued job belongs to a usr that is busy: wait for one to finish
+
+        def finish(usr_id: int, result: str) -> None:
+            with cv:
+                busy.discard(usr_id)
+                summary["ok" if result == "ok" else result] += 1
+                streak[usr_id] = 0 if result != "failed" else streak[usr_id] + 1
+                if streak[usr_id] >= MAX_CONSECUTIVE_FAILURES and usr_id not in dead:
+                    dead.add(usr_id)
+                    dropped = sum(1 for q in queue if q["usr"]["usr_id"] == usr_id)
+                    queue[:] = [q for q in queue if q["usr"]["usr_id"] != usr_id]
+                    summary["skipped"] += dropped
+                    print(f"   🛑 usr {usr_id}: {MAX_CONSECUTIVE_FAILURES} failed jobs in a row — skipping the rest of this usr "
+                        f"({dropped} job(s); expired Fitbit token? re-run onboarding for its account)")
+                cv.notify_all()
+
+        def worker() -> None:
+            wconn = connect_db()                        # own connection: psycopg2 connections are not for concurrent transactions
             try:
-                result = _run_job(conn, config, j, specs[j["usr"]["type"]], ingest_kind)
-            except Exception as e:
-                result = "failed"
-                msg = f"backfill {j['lo']}→{j['hi']} raised {_describe_error(e)}"
-                print(f"   ❌ usr {usr_id}: {msg}")
+                while True:
+                    j = take()
+                    if j is None:
+                        return
+                    usr_id = j["usr"]["usr_id"]
+                    try:
+                        result = _run_job(wconn, config, j, specs[j["usr"]["type"]], ingest_kind)
+                    except Exception as e:
+                        result = "failed"
+                        msg = f"backfill {j['lo']}→{j['hi']} raised {_describe_error(e)}"
+                        print(f"   ❌ usr {usr_id}: {msg}")
+                        try:
+                            wconn.rollback()
+                            _log_run(wconn, usr_id, j["usr"]["type"], "failed", msg)
+                        except Exception:
+                            pass
+                    finish(usr_id, result)
+            finally:
+                wconn.close()
+
+        n_workers = max(1, min(max_workers, len({j["usr"]["usr_id"] for j in jobs})))
+        print(f"   running {len(jobs)} job(s) with {n_workers} worker(s): usrs in parallel, one job at a time per usr")
+        with ThreadPoolExecutor(max_workers=n_workers) as pool:
+            futures = [pool.submit(worker) for _ in range(n_workers)]
+            for fut in as_completed(futures):
                 try:
-                    conn.rollback()
-                    _log_run(conn, usr_id, j["usr"]["type"], "failed", msg)
-                except Exception:
-                    pass
-            summary["ok" if result == "ok" else result] += 1
-            streak[usr_id] = 0 if result != "failed" else streak[usr_id] + 1
-            if streak[usr_id] >= MAX_CONSECUTIVE_FAILURES:
-                dead.add(usr_id)
-                print(f"   🛑 usr {usr_id}: {MAX_CONSECUTIVE_FAILURES} failed jobs in a row — skipping the rest of this usr "
-                    f"(expired Fitbit token? re-run onboarding for its account)")
+                    fut.result()
+                except Exception as e:                  # e.g. a worker could not even open its DB connection
+                    print(f"   ❌ a backfill worker stopped: {_describe_error(e)}")
 
         # planned jobs that were not attempted: cut by max_jobs, cut by the time budget, or skipped for a dead usr
         summary["pending"] = total_jobs - summary["ok"] - summary["partial"] - summary["failed"]
@@ -382,6 +430,7 @@ def _main() -> None:
     p.add_argument("--sync-lag", type=int, dest="sync_lag_days", help="override SYNC_LAG_DAYS: never certify the last N days")
     p.add_argument("--max-jobs", type=int, help="stop after N jobs (the next run continues)")
     p.add_argument("--max-minutes", type=int, help="stop starting new jobs after N minutes (a running job can overrun it)")
+    p.add_argument("--workers", type=int, default=4, help="usrs processed in parallel (default 4; 1 = sequential). One job at a time per usr")
     p.add_argument("--dry-run", action="store_true", help="list the jobs, pull nothing (reads the database)")
     p.add_argument("--check", action="store_true", help="sanity-check the code and study_registry.yml only: no database, no API calls")
     a = p.parse_args()
@@ -391,7 +440,7 @@ def _main() -> None:
         print("✅ All checks passed." if n == 0 else f"❌ {n} problem(s) found.")
         sys.exit(1 if n else 0)
     run_backfill(usr_ids=a.usr, type_=a.type_, data_types=a.data_type, since=a.since, chunk_days=a.chunk_days,
-                sync_lag_days=a.sync_lag_days, max_jobs=a.max_jobs, max_minutes=a.max_minutes, dry_run=a.dry_run)
+                sync_lag_days=a.sync_lag_days, max_jobs=a.max_jobs, max_minutes=a.max_minutes, max_workers=a.workers, dry_run=a.dry_run)
 
 
 if __name__ == "__main__":
