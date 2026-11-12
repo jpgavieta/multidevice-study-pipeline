@@ -43,8 +43,8 @@ from typing import Optional
 from dotenv import load_dotenv
 from psycopg2.extras import Json, execute_values
 
-from general.db_connect import connect_db
-from general.pipeline_logger import end_run, start_run
+from general.connect_db import connect_db
+from general.log_pipeline import end_run, start_run
 
 # ============================================================================================================
 
@@ -365,7 +365,7 @@ def load_processed_data(
     pulled_at: datetime,
 ) -> dict[tuple[str, int], str]:
     """
-    Inserts transform's output into readings.* / accounts.usr. Commits once PER usr_id and logs one raw.pipeline row per usr_id (success / partial / failed) via general.pipeline_logger.
+    Inserts transform's output into readings.* / accounts.usr. Commits once PER usr_id and logs one raw.pipeline row per usr_id (success / partial / failed) via general.log_pipeline.
 
     A usr_id with no ingest_id (its raw.ingests insert failed or was skipped) is skipped entirely: a processed row with no traceable raw source is worse than no row.
     A usr_id whose transform failed (entry carries "error") is logged 'failed' and nothing is loaded for it.

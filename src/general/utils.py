@@ -1,9 +1,9 @@
-# ./src/general/utils_builder.py
+# ./src/general/utils.py
 """
 Helpers to resolve study_registry.yml (SOURCE OF TRUTH). 
-Used by registry_builder.py (sync + validation) and extract.py (resolve_usr) and the check_onboard_* scripts (select_targets). 
+Used by registry.py (sync + validation) and extract.py (resolve_usr) and the check_onboard_* scripts (select_targets). 
 
-This is the YAML layer: it is the one place, besides registry_builder.py and the registry.* tables, that talks about devices (dvc_id), accounts/access credentials (acc_id).
+This is the YAML layer: it is the one place, besides registry.py and the registry.* tables, that talks about devices (dvc_id), accounts/access credentials (acc_id).
 Nothing downstream of extract does.
 
     -   resolve_usr(): a registry.usr row -> the credential an API client needs (extract.py)
@@ -18,18 +18,19 @@ Registry shape this module expects (./config/study_registry.yml):
     participants[]: id, site, start_date, end_date, notes,
                     devices: [{dvc_id, acc_id, start_date, end_date}, ...]    one entry per ASSIGNMENT
 
-An "assignment" is participant + device + account over a date window; it becomes one row of registry.usr.
+A "user" is a unique combination of participant (ppt), device (dvc), and account (acc); it becomes one row of registry.usr
+An "assignment" is user over a date window (started_at/ended_at); it becomes one row of registry.usr_assignment
 
 Dates are half-open: [start_date, end_date). The day a window ends is the day the next one starts.
 
-Rules mirrored from the database (registry.usr):
+Rules mirrored from the database (registry.usr_assignment):
     - an account's type must equal its device's type
     - a device is never in two assignments at once          (no_overlap_per_device)
     - an account is never in two assignments at once        (no_overlap_per_account)
     - end_date is after start_date
 
 Test run (from repo root):
-    PYTHONPATH=src python -m general.utils_builder config/study_registry.yml
+    PYTHONPATH=src python -m general.utils config/study_registry.yml
 """
 
 from datetime import date, datetime
@@ -111,6 +112,22 @@ def resolve_usr(config: Config, usr: Entry) -> Entry:
         raise ValueError(f"usr {usr['usr_id']}: credential is empty (unset !ENV?)")
     return {"usr_id": usr["usr_id"], "type": usr["type"], "acc_id": acc["id"], "cred": acc["cred"]}
 
+def select_usrs(conn, usr_ids: Optional[list[int]] = None, type_: Optional[str] = None) -> list[dict]:
+    """
+    usrs with the keys the pipeline uses: usr_id, type, acc_id, started_at.
+    started_at = the start of the usr's FIRST assignment. It is only the anchor of the backfill chunk grid.
+    The real windows live in registry.usr_assignment and are handled by raw.pull_gaps.
+    A usr with no assignment is not returned (it has nothing to pull).
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT u.id, u.type, u.acc_id, MIN(a.started_at) "
+            "FROM registry.usr u JOIN registry.usr_assignment a ON a.usr_id = u.id "
+            "WHERE (%(ids)s::bigint[] IS NULL OR u.id = ANY(%(ids)s)) AND (%(type)s::text IS NULL OR u.type = %(type)s) "
+            "GROUP BY u.id ORDER BY u.id",
+            {"ids": usr_ids, "type": type_},
+        )
+        return [{"usr_id": r[0], "type": r[1], "acc_id": r[2], "started_at": r[3]} for r in cur.fetchall()]
 
 # ============================================================================================================
 # yml-only target selection (check_onboard_* scripts: no database, no usr_id, works before the registry is seeded)
@@ -391,7 +408,7 @@ def registry_warnings(config: Config) -> list[str]:
 
 if __name__ == "__main__":
     import sys
-    from general.registry_builder import load_registry
+    from general.registry import load_registry
 
     path = sys.argv[1] if len(sys.argv) > 1 else "config/study_registry.yml"
     config = load_registry(path)

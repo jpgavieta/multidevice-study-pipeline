@@ -1,12 +1,12 @@
-# src/general/pipeline_logger.py
+# src/general/log_pipeline.py
 """
 Writes one row per usage (registry.usr) per pipeline run into raw.pipeline,
 so failures/successes/durations are queryable after the fact, not only visible in whatever the run printed to stdout.
 
 Why runs are keyed by usr_id:
-    A registry.usr row is participant + device + account over a date window. 
-    A device that changes hands (fit_04: ppt_04's account, then ppt_08's) gets a NEW usr row, so the new participant starts with no run history and cannot inherit the previous participant's last-success timestamp. 
-    extract.py then falls back to that usage's start_date. (If you correct a usage's start_date in the YAML, the old usr row is replaced and its history with it.)
+    A registry.usr row is participant + device + account. Its time windows live in registry.usr_assignment, so two windows of the same triple share one usr_id and one run history. 
+    A device that changes hands (fit_04: ppt_04's  account, then ppt_08's) gets a NEW usr row, so the new participant starts with no run history and cannot inherit the previous participant's last-success timestamp. extract.py then falls back to the start of the usr's latest window.
+    Correcting a window's dates in the YAML keeps the usr row and its history.
 
 raw.pipeline columns used: id, usr_id, status ('running' | 'success' | 'failed' | 'partial'), started_at, ended_at, error_message.
 Timestamps come from the database clock (started_at defaults to now(); ended_at is set with now()).
@@ -70,7 +70,7 @@ def last_successful_fetch(conn, usr_id: int):
     Returns started_at of the most recent 'success' run for this usage, or None if there has never been one.
 
     Using started_at (not ended_at) is the safe cutoff: anything that arrived while the run was in progress is fetched again next time rather than missed.
-    When None is returned, extract.py should start from the usage's start_date (registry.usr.start_date).
+    When None is returned, extract.py should start from the start of the usr's latest window (registry.usr_assignment).
     """
     with conn.cursor() as cur:
         cur.execute(

@@ -2,12 +2,15 @@
 """
 Seed/sync registry.type, site, dvc, ppt, acc and usr from config/study_registry.yml.
 
-The yml is the single source of truth: registry_builder.sync_all() makes the database mirror it, in ONE transaction.
+The yml is the single source of truth: registry.sync_all() makes the database mirror it, in ONE transaction.
 Safe to re-run: unchanged rows are not touched (last_updated stays put), changed rows are updated in place, and rows that are no longer in the yml are removed.
 
-registry.usr (one row per participant + device + account window) is matched to existing rows by (dvc_id, started_at), then by same ppt + device + account with an overlapping window (see registry_builder):
-    -   a corrected started_at / ended_at / acc_id / ppt_id updates the row in place (its usr_id is kept)
-    -   an entry matching nothing is inserted; a row matching no entry is deleted
+registry.usr (one row per participant + device + account) and registry.usr_assignment (its time windows) are synced together (see registry.py). 
+The same ppt + device + account in two windows is ONE usr_id:
+    -   a usr is matched on its triple; a new triple is inserted, a triple no longer in the yml is deleted
+    -   an assignment is matched within its usr by start date, else by the one overlapping window, so a corrected
+        started_at / ended_at updates the row in place (its id is kept)
+    -   changing a usr's participant, device or account makes a NEW usr and deletes the old one
     If anything in raw.* / readings.* still points at a row being deleted, the delete is refused and the whole sync rolls back.
 
 The yml is validated BEFORE the database is touched; a bad yml (unset !ENV, type mismatch, overlapping windows...) changes nothing.
@@ -25,11 +28,11 @@ import sys
 
 from psycopg2 import sql
 
-from general.db_connect import connect_db
-from general.registry_builder import sync_all
+from general.connect_db import connect_db
+from general.registry import sync_all
 
 # Printed in this order; names are constants, never user input.
-REGISTRY_TABLES = ("type", "site", "dvc", "ppt", "acc", "usr")
+REGISTRY_TABLES = ("type", "site", "dvc", "ppt", "acc", "usr", "usr_assignment")
 
 
 def _count(cur, table: str) -> int:
@@ -63,7 +66,8 @@ def main() -> int:
 
     print("✅ Seeded registry: "
         f"{counts['type']} type(s), {counts['site']} site(s), {counts['dvc']} device(s), "
-        f"{counts['ppt']} participant(s), {counts['acc']} account(s), {counts['usr']} usr row(s)")
+        f"{counts['ppt']} participant(s), {counts['acc']} account(s), {counts['usr']} user(s), "
+        f"{counts['usr_assignment']} user assignment(s)")
     return 0
 
 

@@ -39,7 +39,7 @@ import sys
 import time
 from pathlib import Path
 
-from general.db_connect import connect_db
+from general.connect_db import connect_db
 from transform.transform import PARSER_REGISTRY
 from transform.scripts.test_transform import SECRETS_DIR, _resolve_capture
 from load.load import (

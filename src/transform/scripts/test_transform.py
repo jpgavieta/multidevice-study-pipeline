@@ -1,6 +1,6 @@
 # ./src/transform/scripts/test_transform.py
 """
-Generic debug script for device parsers (transform/parse/<type>_parser.py). Not part of the pipeline, no db, no study_registry, no general.utils_builder.select_targets.
+Generic debug script for device parsers (transform/parse/<type>_parser.py). Not part of the pipeline, no db, no study_registry, no general.utils.select_targets.
 
 Feeds a real captured API pull (outputted by extract/scripts/test_extract.py) through parser.parse(raw, usr_id) DIRECTLY.
 A broken parser raises here instead of being skipped by transform.py's try/except.
