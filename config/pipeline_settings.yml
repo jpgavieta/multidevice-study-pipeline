@@ -1,0 +1,36 @@
+# ./config/pipeline_settings.yml
+
+# If anything changes, always restart `sudo systemctl restart multidevice_schedule.service`
+
+# ============================================================================================================
+
+# Secrets do NOT go here: SLACK_BOT_TOKEN and DB_* stay in deploy/.env.
+
+# Every value is required (the code has no defaults): a missing or out-of-range value stops startup, with ALL problems listed. 
+# An env var, if set, WINS over this file. Don't leave old copies of these in deploy/.env.
+
+# Check without starting anything:
+#     PYTHONPATH=src python -m general.settings --check
+
+# One-off override (e.g. a test run): set the env var named in general/settings.py, for example
+#     PIPELINE_CATCHUP_HOURS=1 PYTHONPATH=src ./deploy/postgres/test_db.sh python src/main.py
+
+schedule:
+  run_hour: 23              # hour of the daily run cycle, UTC (IST = UTC+5:30) 0-23
+  run_minute: 10            # minute of the daily run cycle, UTC                0-59
+  catchup_hours: 25         # if the last successful pull is older, run once    1-336
+  retry_attempts: 3         # run retries on transient errors (DB/network)      1-10
+  retry_wait_seconds: 60    # wait between those retries                        0-3600
+
+forwardfill:
+  max_forwardfill_days: 14   # daily pull covers N days per usr; older days are backfill   1-366
+
+backfill:
+  max_jobs: 200             # was 40: the first run left 117 pending
+  workers: 4                # keep the validated value; 6 was never tested against the API limits
+  minutes: 180              # time budget for ordinary daily runs after the first
+  first_run_minutes: 720    # larger budget for the first run after a (re)start
+  
+alerts:
+  slack_channel: "#pipeline-alerts"   # channel name or ID; the bot must be invited to it. KEEP THE QUOTES: an unquoted # starts a YAML comment.
+  notify_on_ok: true                  # true = Slack message after every fully successful run; false = warnings and failures only

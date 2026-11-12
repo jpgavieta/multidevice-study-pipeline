@@ -1,6 +1,6 @@
 # ./config/study_registry.yml
 
-# If any changes happen here, always update the './src/general/registry_builder.py' 
+# If any changes happen here, always update './src/general/registry.py' 
 
 # ============================================================================================================
 
@@ -145,6 +145,10 @@ participants:
       - dvc_id: fit_01
         acc_id: "0201"
         start_date: 2026-06-16
+        end_date: null
+      - dvc_id: atmo_01
+        acc_id: "0101"
+        start_date: 2026-10-01
         end_date: null
 
   - id: ppt_02
