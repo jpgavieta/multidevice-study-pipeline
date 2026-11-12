@@ -1,12 +1,16 @@
 [Unit]
-Description=MultiDevice ETL Pipeline Scheduler
+Description=MultiDevice Pipeline Scheduler
+After=network-onl ine.target docker.service
+Wants=network-online.target
+StartLimitIntervalSec=0
 
 [Service]
 ExecStart=/home/yul/miniforge3/envs/multidevice_dataviz/bin/python /home/yul/Projects/Repos/multidevice-study-pipeline/src/main.py
 WorkingDirectory=/home/yul/Projects/Repos/multidevice-study-pipeline
 EnvironmentFile=/home/yul/Projects/Repos/multidevice-study-pipeline/deploy/.env
-Restart=on-failure
+Restart=always
 RestartSec=10
+TimeoutStopSec=600
 User=yul
 
 [Install]
